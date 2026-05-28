@@ -52,6 +52,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - name: Checkout repository
@@ -74,18 +76,20 @@ jobs:
         with:
           images: ${{ env.BASE_IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
+            type=ref,event=pr
+            type=raw,value=latest,enable=${{ github.event_name != 'pull_request' }}
             type=sha,prefix={{branch}}-
             type=ref,event=branch
             type=semver,pattern={{version}}
 
       - name: Build and push base image
+        id: build
         uses: docker/build-push-action@v5
         with:
           build-args: |
             DOCKER_GROUP_ID=${{ needs.github-context.outputs.docker_group_id }}
           context: ./base
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true # PRs push too so test jobs can pull this exact build by digest
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           cache-from: type=registry,ref=${{ env.BASE_IMAGE_NAME }}:buildcache
@@ -99,7 +103,7 @@ jobs:
     timeout-minutes: 5
     container:
       # https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/run-jobs-in-a-container
-      image: jclaveau/ubuntu-dind:latest
+      image: jclaveau/ubuntu-dind@${{ needs.build-base.outputs.digest }}
       options: >-
         --privileged
         --add-host=host.docker.internal:host-gateway
@@ -152,6 +156,8 @@ jobs:
     permissions:
       contents: read
       packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
 
     steps:
       - name: Checkout repository
@@ -174,20 +180,22 @@ jobs:
         with:
           images: ${{ env.PLAYWRIGHT_IMAGE_NAME }}
           tags: |
-            type=raw,value=latest
+            type=ref,event=pr
+            type=raw,value=latest,enable=${{ github.event_name != 'pull_request' }}
             type=sha,prefix={{branch}}-
             type=ref,event=branch
             type=semver,pattern={{version}}
 
       - name: Build and push Playwright image
+        id: build
         uses: docker/build-push-action@v5
         with:
           context: ./playwright
-          push: ${{ github.event_name != 'pull_request' }}
+          push: true # PRs push too so test jobs can pull this exact build by digest
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BASE_IMAGE=${{ env.BASE_IMAGE_NAME }}:latest
+            BASE_IMAGE=${{ env.BASE_IMAGE_NAME }}@${{ needs.build-base.outputs.digest }}
           cache-from: type=registry,ref=${{ env.PLAYWRIGHT_IMAGE_NAME }}:buildcache
           cache-to: type=registry,ref=${{ env.PLAYWRIGHT_IMAGE_NAME }}:buildcache,mode=max
 
@@ -198,7 +206,7 @@ jobs:
     needs: build-playwright
     timeout-minutes: 5
     container:
-      image: jclaveau/playwright-dind:latest
+      image: jclaveau/playwright-dind@${{ needs.build-playwright.outputs.digest }}
       options: >-
         --privileged
         --add-host=host.docker.internal:host-gateway
@@ -239,7 +247,7 @@ jobs:
     needs: build-playwright
     timeout-minutes: 5
     container:
-      image: jclaveau/playwright-dind:latest
+      image: jclaveau/playwright-dind@${{ needs.build-playwright.outputs.digest }}
       options: >-
         --privileged
         --add-host=host.docker.internal:host-gateway
