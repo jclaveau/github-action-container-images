@@ -16,6 +16,10 @@ services:
       POSTGRES_USER: "postgres"
       POSTGRES_PASSWORD: "postgres"
       POSTGRES_DB: "postgres"
+      # Nested dind has no /sys/fs/cgroup/memory.max, so pin tuning to skip cgroup auto-detection
+      # (otherwise timescaledb-tune panics on 0 bytes and postgres exits 2).
+      TS_TUNE_MEMORY: "512MB"
+      TS_TUNE_NUM_CPUS: "2"
     healthcheck:
       test: pg_isready -U postgres -d postgres
       interval: 3s

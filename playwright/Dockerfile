@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-ARG BASE_IMAGE=jclaveau/pnpm-dind:latest
+ARG BASE_IMAGE=jclaveau/ubuntu-dood-pnpm:latest
 FROM ${BASE_IMAGE}
 
 # Renovate will update this

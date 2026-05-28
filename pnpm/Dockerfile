@@ -1,5 +1,5 @@
 # syntax=docker/dockerfile:1
-ARG BASE_IMAGE=jclaveau/ubuntu-dind:latest
+ARG BASE_IMAGE=jclaveau/ubuntu-dood:latest
 FROM ${BASE_IMAGE}
 
 # Renovate will update these

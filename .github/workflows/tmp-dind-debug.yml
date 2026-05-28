@@ -1,0 +1,90 @@
+name: tmp dind daemon survival debug
+
+# Throwaway diagnostic: does the inner dockerd started in step 1 survive into step 2,
+# and capture as much docker/system state as possible. Reuses the published
+# jclaveau/ubuntu-dind:latest (no build). Delete when answered.
+# NB: GHA drops this container job's stdout, so every step does `exec 1>&2`.
+
+on:
+  workflow_dispatch:   # run on demand only (kept for debug/data; no auto-run on pushes)
+
+jobs:
+  dind-survival:
+    runs-on: ubuntu-latest
+    timeout-minutes: 8
+    container:
+      image: jclaveau/ubuntu-dind:latest
+      options: >-
+        --privileged
+        --env "HOME=/home/runner"
+    env:
+      DOCKER_STORAGE_DRIVER: vfs   # rule out the overlay2-nested crash; isolate cross-step survival
+    steps:
+      - name: Step 1 - write shared snapshot script, start daemon, full snapshot
+        run: |
+          exec 1>&2
+          set +e
+          cat > /tmp/diag.sh <<'DIAG'
+          #!/usr/bin/env bash
+          echo "================= SYSTEM ================="
+          uname -a
+          echo "whoami=$(whoami) id=$(id)"
+          echo "-- PID 1 --"; cat /proc/1/comm 2>/dev/null; tr '\0' ' ' </proc/1/cmdline 2>/dev/null; echo
+          echo "-- cgroup fs type --"; stat -fc %T /sys/fs/cgroup 2>/dev/null
+          echo "-- self cgroup --"; cat /proc/self/cgroup 2>/dev/null
+          echo "-- /sys/fs/cgroup memory --"; ls /sys/fs/cgroup 2>/dev/null | tr '\n' ' '; echo; cat /sys/fs/cgroup/memory.max 2>/dev/null || echo "(no memory.max)"
+          echo "-- memory --"; grep -E 'MemTotal|MemAvailable' /proc/meminfo 2>/dev/null
+          echo "-- disk --"; df -h / /var/lib/docker /tmp 2>/dev/null
+          echo "-- mounts (docker/overlay/cgroup/fuse) --"; (mount 2>/dev/null || cat /proc/mounts) | grep -Ei 'docker|overlay|cgroup|fuse' | head -40
+          echo "-- /var/run + /run sockets --"; ls -la /var/run/*.sock /run/*.sock 2>/dev/null
+          echo "-- /dev/fuse --"; ls -la /dev/fuse 2>/dev/null || echo "(no /dev/fuse)"
+          echo "================= DOCKER PROCESSES (/proc scan) ================="
+          for c in /proc/[0-9]*/comm; do
+            n=$(cat "$c" 2>/dev/null) || continue
+            case "$n" in
+              *dockerd*|*containerd*|*docker-proxy*|*runc*)
+                pid=$(basename "$(dirname "$c")")
+                st=$(awk '{print $3}' /proc/$pid/stat 2>/dev/null); ppid=$(awk '{print $4}' /proc/$pid/stat 2>/dev/null); sess=$(awk '{print $6}' /proc/$pid/stat 2>/dev/null)
+                echo "pid=$pid comm=$n state=$st ppid=$ppid session=$sess"
+                echo "    cmd: $(tr '\0' ' ' </proc/$pid/cmdline 2>/dev/null)"
+                echo "    cgroup: $(tr '\n' ' ' </proc/$pid/cgroup 2>/dev/null)"
+                ;;
+            esac
+          done
+          echo "================= DOCKER CLIENT (DOCKER_HOST=${DOCKER_HOST:-<unset>}) ================="
+          docker version 2>&1 || echo "docker version FAILED"
+          docker info 2>&1 || echo "docker info FAILED"
+          docker ps -a 2>&1 || true
+          docker images 2>&1 || true
+          docker system df 2>&1 || true
+          echo "================= /tmp/dockerd.log ================="
+          cat /tmp/dockerd.log 2>&1 || echo "(no /tmp/dockerd.log)"
+          echo "================= dmesg (kernel; may be denied) ================="
+          sudo dmesg 2>/dev/null | tail -n 30 || echo "(dmesg unavailable)"
+          DIAG
+          chmod +x /tmp/diag.sh
+
+          echo "### STEP 1: starting daemon"
+          start-dockerd
+          export DOCKER_HOST=unix:///var/run/dind.sock
+          # record the dockerd PID + session so step 2 can check the exact process
+          for c in /proc/[0-9]*/comm; do n=$(cat "$c" 2>/dev/null) || continue; case "$n" in dockerd) basename "$(dirname "$c")" > /tmp/step1-dockerd.pid; awk '{print $6}' /proc/$(cat /tmp/step1-dockerd.pid)/stat > /tmp/step1-dockerd.sess;; esac; done
+          echo "### STEP 1 recorded dockerd pid=$(cat /tmp/step1-dockerd.pid 2>/dev/null) session=$(cat /tmp/step1-dockerd.sess 2>/dev/null)"
+          DOCKER_HOST=unix:///var/run/dind.sock bash /tmp/diag.sh
+          echo "### END OF STEP 1"
+
+      - name: Step 2 - survival verdict + full snapshot after the boundary
+        run: |
+          exec 1>&2
+          set +e
+          export DOCKER_HOST=unix:///var/run/dind.sock
+          echo "### START OF STEP 2"
+          PID1=$(cat /tmp/step1-dockerd.pid 2>/dev/null)
+          echo "recorded step-1 dockerd pid=$PID1 session=$(cat /tmp/step1-dockerd.sess 2>/dev/null)"
+          if [ -n "$PID1" ] && [ -e /proc/$PID1 ]; then
+            echo ">>> VERDICT: dockerd pid=$PID1 STILL EXISTS (state=$(awk '{print $3}' /proc/$PID1/stat 2>/dev/null), ppid=$(awk '{print $4}' /proc/$PID1/stat 2>/dev/null))"
+          else
+            echo ">>> VERDICT: dockerd pid=$PID1 is GONE across the step boundary"
+          fi
+          bash /tmp/diag.sh
+          echo "### END OF STEP 2"
