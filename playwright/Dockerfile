@@ -22,7 +22,7 @@ ENV PLAYWRIGHT_BROWSERS_PATH='/home/runner/playwright-browsers'
 
 
 RUN echo "Install PNPM https://pnpm.io/installation#in-a-docker-container" \
-    && wget -qO- https://get.pnpm.io/install.sh | ENV="$HOME/.bashrc" SHELL="$(which bash)" bash - \
+    && wget -qO- https://get.pnpm.io/install.sh | PNPM_VERSION=${PNPM_VERSION} ENV="$HOME/.bashrc" SHELL="$(which bash)" bash - \
     \
     \
     && echo "Install Node.js" \

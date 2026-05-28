@@ -59,7 +59,8 @@ RUN echo "Install dependencies & basic tools" \
     && echo "deb [arch=$(dpkg --print-architecture) signed-by=/usr/share/keyrings/docker-archive-keyring.gpg] https://download.docker.com/linux/ubuntu $(lsb_release -cs) stable" \
     | tee /etc/apt/sources.list.d/docker.list > /dev/null \
     && apt-get update \
-    && apt-get install -y docker-ce docker-ce-cli containerd.io \
+    && VERSION_STRING="$(apt-cache madison docker-ce | awk '{print $3}' | grep -m1 "${DOCKER_VERSION}")" \
+    && apt-get install -y docker-ce="$VERSION_STRING" docker-ce-cli="$VERSION_STRING" containerd.io \
     && rm -rf /var/lib/apt/lists/* \
     \
     && curl -L "https://github.com/docker/compose/releases/download/v${DOCKER_COMPOSE_VERSION}/docker-compose-$(uname -s)-$(uname -m)" \

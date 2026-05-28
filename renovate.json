@@ -25,6 +25,11 @@
       "groupName": "Playwright"
     },
     {
+      "matchDatasources": ["npm"],
+      "matchPackageNames": ["pnpm"],
+      "groupName": "pnpm"
+    },
+    {
       "matchDatasources": ["node-version"],
       "matchPackageNames": ["node"],
       "groupName": "Node.js"
@@ -69,6 +74,16 @@
       ],
       "datasourceTemplate": "npm",
       "depNameTemplate": "playwright",
+      "versioningTemplate": "npm"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": ["^playwright/Dockerfile$"],
+      "matchStrings": [
+        "ARG PNPM_VERSION=(?<currentValue>.*?)\\n"
+      ],
+      "datasourceTemplate": "npm",
+      "depNameTemplate": "pnpm",
       "versioningTemplate": "npm"
     }
   ],
