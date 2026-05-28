@@ -10,6 +10,11 @@
       "groupName": "Ubuntu base image"
     },
     {
+      "matchDatasources": ["docker"],
+      "matchPackageNames": ["docker"],
+      "groupName": "Docker Engine"
+    },
+    {
       "matchDatasources": ["github-releases"],
       "matchPackageNames": ["docker/compose"],
       "groupName": "Docker Compose"
@@ -25,30 +30,42 @@
       "groupName": "Node.js"
     }
   ],
-  "regexManagers": [
+  "customManagers": [
     {
+      "customType": "regex",
       "fileMatch": ["^base/Dockerfile$"],
       "matchStrings": [
-        "ARG DOCKER_VERSION=(?.*?)\\n",
-        "ARG DOCKER_COMPOSE_VERSION=(?.*?)\\n"
+        "ARG DOCKER_VERSION=(?<currentValue>.*?)\\n"
+      ],
+      "datasourceTemplate": "docker",
+      "depNameTemplate": "docker",
+      "versioningTemplate": "docker"
+    },
+    {
+      "customType": "regex",
+      "fileMatch": ["^base/Dockerfile$"],
+      "matchStrings": [
+        "ARG DOCKER_COMPOSE_VERSION=(?<currentValue>.*?)\\n"
       ],
       "datasourceTemplate": "github-releases",
       "depNameTemplate": "docker/compose",
       "versioningTemplate": "semver"
     },
     {
+      "customType": "regex",
       "fileMatch": ["^playwright/Dockerfile$"],
       "matchStrings": [
-        "ARG NODE_VERSION=(?.*?)\\n"
+        "ARG NODE_VERSION=(?<currentValue>.*?)\\n"
       ],
       "datasourceTemplate": "node-version",
       "depNameTemplate": "node",
       "versioningTemplate": "node"
     },
     {
+      "customType": "regex",
       "fileMatch": ["^playwright/Dockerfile$"],
       "matchStrings": [
-        "ARG PLAYWRIGHT_VERSION=(?.*?)\\n"
+        "ARG PLAYWRIGHT_VERSION=(?<currentValue>.*?)\\n"
       ],
       "datasourceTemplate": "npm",
       "depNameTemplate": "playwright",
