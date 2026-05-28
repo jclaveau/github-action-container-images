@@ -21,6 +21,7 @@ concurrency:
 env:
   REGISTRY: docker.io
   BASE_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/ubuntu-dind
+  PNPM_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/pnpm-dind
   PLAYWRIGHT_IMAGE_NAME: ${{ secrets.DOCKERHUB_USERNAME }}/playwright-dind
 
 jobs:
@@ -149,9 +150,100 @@ jobs:
       #   if: always()
 
 
-  build-playwright:
+  build-pnpm:
     runs-on: ubuntu-latest
     needs: build-base
+    permissions:
+      contents: read
+      packages: write
+    outputs:
+      digest: ${{ steps.build.outputs.digest }}
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-flags: --debug
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Extract metadata for pnpm image
+        id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ env.PNPM_IMAGE_NAME }}
+          tags: |
+            type=ref,event=pr
+            type=raw,value=latest,enable=${{ github.event_name != 'pull_request' }}
+            type=sha,prefix={{branch}}-
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+
+      - name: Build and push pnpm image
+        id: build
+        uses: docker/build-push-action@v5
+        with:
+          context: ./pnpm
+          push: true # PRs push too so test jobs can pull this exact build by digest
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BASE_IMAGE=${{ env.BASE_IMAGE_NAME }}@${{ needs.build-base.outputs.digest }}
+          cache-from: type=registry,ref=${{ env.PNPM_IMAGE_NAME }}:buildcache
+          cache-to: type=registry,ref=${{ env.PNPM_IMAGE_NAME }}:buildcache,mode=max
+
+
+  test-node-gyp-on-pnpm:
+    runs-on: ubuntu-latest
+    needs: build-pnpm
+    timeout-minutes: 5
+    container:
+      image: jclaveau/pnpm-dind@${{ needs.build-pnpm.outputs.digest }}
+      options: >-
+        --privileged
+        --add-host=host.docker.internal:host-gateway
+        --env "PWD=${{ github.workspace }}"
+        --env "HOME=/home/runner"
+      volumes:
+        - /home/runner/work:/home/runner/work
+    steps:
+      - run: node --version
+      - run: npm --version
+      - run: pnpm --version
+      - run: python3 --version
+      - run: make --version
+      - run: g++ --version
+
+      - name: Compile a trivial native addon with node-gyp
+        run: |
+          mkdir -p /tmp/gyp-test && cd /tmp/gyp-test
+          cat > hello.cc <<'EOF'
+          #include <node.h>
+          namespace demo {
+            using v8::FunctionCallbackInfo; using v8::Isolate;
+            using v8::Local; using v8::Object; using v8::String; using v8::Value;
+            void Method(const FunctionCallbackInfo<Value>& a){
+              a.GetReturnValue().Set(String::NewFromUtf8(a.GetIsolate(),"ok").ToLocalChecked());
+            }
+            void Init(Local<Object> e){ NODE_SET_METHOD(e,"hello",Method); }
+            NODE_MODULE(NODE_GYP_MODULE_NAME, Init)
+          }
+          EOF
+          printf '{ "targets": [ { "target_name": "hello", "sources": [ "hello.cc" ] } ] }' > binding.gyp
+          npx -y node-gyp rebuild
+          node -e "console.log(require('./build/Release/hello.node').hello())"
+
+
+  build-playwright:
+    runs-on: ubuntu-latest
+    needs: build-pnpm
     # needs: test-postgres-on-base
     permissions:
       contents: read
@@ -195,7 +287,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BASE_IMAGE=${{ env.BASE_IMAGE_NAME }}@${{ needs.build-base.outputs.digest }}
+            BASE_IMAGE=${{ env.PNPM_IMAGE_NAME }}@${{ needs.build-pnpm.outputs.digest }}
           cache-from: type=registry,ref=${{ env.PLAYWRIGHT_IMAGE_NAME }}:buildcache
           cache-to: type=registry,ref=${{ env.PLAYWRIGHT_IMAGE_NAME }}:buildcache,mode=max
 

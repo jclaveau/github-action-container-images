@@ -6,7 +6,8 @@
 
 ### Implemented
 - [ ] Base: [Ubuntu 24.04](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md) with [DinD](https://www.docker.com/resources/docker-in-docker-containerized-ci-workflows-dockercon-2023/) support
-- [ ] Playwright: Base image with Node, Pnpm and Playwright
+- [ ] Pnpm: Base image with Node, Pnpm and node-gyp build tools (python3, make, g++)
+- [ ] Playwright: Pnpm image with Playwright
 
 ### Todo
 - Check [the issues](https://github.com/jclaveau/github-action-container-images/issues)

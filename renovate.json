@@ -58,7 +58,7 @@
     },
     {
       "customType": "regex",
-      "fileMatch": ["^playwright/Dockerfile$"],
+      "fileMatch": ["^pnpm/Dockerfile$"],
       "matchStrings": [
         "ARG NODE_VERSION=(?<currentValue>.*?)\\n"
       ],
@@ -78,7 +78,7 @@
     },
     {
       "customType": "regex",
-      "fileMatch": ["^playwright/Dockerfile$"],
+      "fileMatch": ["^pnpm/Dockerfile$"],
       "matchStrings": [
         "ARG PNPM_VERSION=(?<currentValue>.*?)\\n"
       ],
