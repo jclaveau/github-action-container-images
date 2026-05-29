@@ -25,8 +25,9 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       docker_group_id: ${{ steps.extract_docker_group_id.outputs.docker_group_id }}
-      # Images reference each other by this tag: pr-<n> on PRs, latest on push (both freshly pushed this run).
-      tag: ${{ github.event_name == 'pull_request' && format('pr-{0}', github.event.number) || 'latest' }}
+      # Throwaway run-scoped tag. Builds push only this; the chain + tests reference it. The
+      # consumer tags (latest / pr-<n>) are added later by `promote`, only once every test passes.
+      build_tag: sha-${{ github.sha }}
     steps:
       # for debug only
       - run: sudo cat /etc/passwd
@@ -74,12 +75,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood
-          tags: |
-            type=ref,event=pr
-            type=raw,value=latest,enable=${{ github.event_name != 'pull_request' }}
-            type=sha,prefix={{branch}}-
-            type=ref,event=branch
-            type=semver,pattern={{version}}
+          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
+          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
       - uses: docker/build-push-action@v5
         with:
           context: ./base
@@ -113,12 +110,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind
-          tags: |
-            type=ref,event=pr
-            type=raw,value=latest,enable=${{ github.event_name != 'pull_request' }}
-            type=sha,prefix={{branch}}-
-            type=ref,event=branch
-            type=semver,pattern={{version}}
+          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
+          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
       - uses: docker/build-push-action@v5
         with:
           context: ./dind
@@ -126,7 +119,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood:${{ needs.github-context.outputs.tag }}
+            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood:${{ needs.github-context.outputs.build_tag }}
           cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind:buildcache,mode=max
 
@@ -153,12 +146,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-pnpm
-          tags: |
-            type=ref,event=pr
-            type=raw,value=latest,enable=${{ github.event_name != 'pull_request' }}
-            type=sha,prefix={{branch}}-
-            type=ref,event=branch
-            type=semver,pattern={{version}}
+          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
+          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
       - uses: docker/build-push-action@v5
         with:
           context: ./pnpm
@@ -166,7 +155,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood:${{ needs.github-context.outputs.tag }}
+            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood:${{ needs.github-context.outputs.build_tag }}
           cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-pnpm:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-pnpm:buildcache,mode=max
 
@@ -192,12 +181,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-pnpm
-          tags: |
-            type=ref,event=pr
-            type=raw,value=latest,enable=${{ github.event_name != 'pull_request' }}
-            type=sha,prefix={{branch}}-
-            type=ref,event=branch
-            type=semver,pattern={{version}}
+          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
+          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
       - uses: docker/build-push-action@v5
         with:
           context: ./dind
@@ -205,7 +190,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-pnpm:${{ needs.github-context.outputs.tag }}
+            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-pnpm:${{ needs.github-context.outputs.build_tag }}
           cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-pnpm:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-pnpm:buildcache,mode=max
 
@@ -232,12 +217,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-playwright
-          tags: |
-            type=ref,event=pr
-            type=raw,value=latest,enable=${{ github.event_name != 'pull_request' }}
-            type=sha,prefix={{branch}}-
-            type=ref,event=branch
-            type=semver,pattern={{version}}
+          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
+          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
       - uses: docker/build-push-action@v5
         with:
           context: ./playwright
@@ -245,7 +226,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-pnpm:${{ needs.github-context.outputs.tag }}
+            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-pnpm:${{ needs.github-context.outputs.build_tag }}
           cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-playwright:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-playwright:buildcache,mode=max
 
@@ -271,12 +252,8 @@ jobs:
         uses: docker/metadata-action@v5
         with:
           images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-playwright
-          tags: |
-            type=ref,event=pr
-            type=raw,value=latest,enable=${{ github.event_name != 'pull_request' }}
-            type=sha,prefix={{branch}}-
-            type=ref,event=branch
-            type=semver,pattern={{version}}
+          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
+          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
       - uses: docker/build-push-action@v5
         with:
           context: ./dind
@@ -284,18 +261,21 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-playwright:${{ needs.github-context.outputs.tag }}
+            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-playwright:${{ needs.github-context.outputs.build_tag }}
           cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-playwright:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-playwright:buildcache,mode=max
 
 
   # ----------------------------------------------------------------------------
-  # Tests: same suite per layer, run on every os×mode cell. Only the pwd test and
-  # the Postgres endpoint branch by mode (dind uses the inner daemon on localhost;
-  # dood uses the GHA-mounted host daemon via host.docker.internal).
+  # Tests: split per the README's Usage vs Effects contract.
+  #  - *-usage   : the documented usage works (daemon reachable, compose comes up). Mode-agnostic.
+  #  - *-effects : the dood/dind behavioural divergence — where published ports land, and whether
+  #                a bind-mount resolves in-namespace. Re-runs the stack in its own container.
+  # Effects are layer-independent (the dind overlay is byte-identical across layers), so they're
+  # tested once, at the base layer.
   # ----------------------------------------------------------------------------
 
-  test-base:
+  test-base-usage:
     runs-on: ubuntu-latest
     needs: [github-context, build-base-dood, build-base-dind]
     timeout-minutes: 5
@@ -310,7 +290,7 @@ jobs:
         os: [ubuntu]
         mode: [dood, dind]
     container:
-      image: jclaveau/${{ matrix.os }}-${{ matrix.mode }}:${{ needs.github-context.outputs.tag }}
+      image: jclaveau/${{ matrix.os }}-${{ matrix.mode }}:${{ needs.github-context.outputs.build_tag }}
       # dind: point clients at the inner daemon via the container env (NOT $GITHUB_ENV, which would
       # leak DOCKER_HOST to the host-side post-job cleanup and fail it). dood: unset => host socket.
       options: >-
@@ -338,14 +318,53 @@ jobs:
           sudo mkdir -p -m 777 ./docker/volumes/postgres_15
           sudo chown -R 1000:1000 ./docker/volumes/postgres_15/
 
+      - name: docker compose comes up (in-network healthchecks pass)
+        run: docker compose -f ./docker-compose-tests.yaml up -d --wait
+
+
+  test-base-effects:
+    runs-on: ubuntu-latest
+    needs: [github-context, build-base-dood, build-base-dind]
+    timeout-minutes: 5
+    env:
+      DOCKER_STORAGE_DRIVER: fuse-overlayfs
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu]
+        mode: [dood, dind]
+    container:
+      image: jclaveau/${{ matrix.os }}-${{ matrix.mode }}:${{ needs.github-context.outputs.build_tag }}
+      options: >-
+        --privileged
+        --add-host=host.docker.internal:host-gateway
+        --env "PWD=${{ github.workspace }}"
+        --env "HOME=/home/runner"
+        ${{ matrix.mode == 'dind' && '--env DOCKER_HOST=unix:///var/run/dind.sock' || '' }}
+      volumes:
+        - /home/runner/work:/home/runner/work
+    steps:
+      - name: Start inner daemon (dind only)
+        if: matrix.mode == 'dind'
+        run: start-dockerd
+
+      - uses: actions/checkout@v4
+
+      - name: Creating DB volume (as locally)
+        run: |
+          sudo mkdir -p -m 777 ./docker/volumes/postgres_15
+          sudo chown -R 1000:1000 ./docker/volumes/postgres_15/
+
       - run: docker compose -f ./docker-compose-tests.yaml up -d --wait
 
-      - name: Postgres reachable
+      # Effect — published ports: dind publishes inside the job container (reach on localhost);
+      # dood publishes on the shared host daemon (reach via host.docker.internal).
+      - name: Published port lands at the mode-correct endpoint
         run: sudo nc -zv ${{ matrix.mode == 'dind' && 'localhost' || 'host.docker.internal' }} 5432
 
-      # pwd / bind-mount: the one behaviour that differs by mode. Container-only path (/tmp, not the
-      # host-mounted workspace) so dind resolves it but dood's host daemon genuinely cannot.
-      - name: pwd bind-mount differs by mode
+      # Effect — bind-mount resolution. Container-only path (/tmp, not the host-mounted workspace)
+      # so dind resolves it in-namespace but dood's host daemon genuinely cannot.
+      - name: Bind-mount resolution differs by mode
         run: |
           docker pull -q alpine >/dev/null 2>&1 || true   # pre-pull so image-pull noise stays out of the check
           echo "marker-${{ github.sha }}" > /tmp/pwdmarker.txt
@@ -362,7 +381,7 @@ jobs:
           fi
 
 
-  test-pnpm:
+  test-pnpm-usage:
     runs-on: ubuntu-latest
     needs: [github-context, build-pnpm-dood, build-pnpm-dind]
     timeout-minutes: 5
@@ -372,7 +391,7 @@ jobs:
         os: [ubuntu]
         mode: [dood, dind]
     container:
-      image: jclaveau/${{ matrix.os }}-${{ matrix.mode }}-pnpm:${{ needs.github-context.outputs.tag }}
+      image: jclaveau/${{ matrix.os }}-${{ matrix.mode }}-pnpm:${{ needs.github-context.outputs.build_tag }}
       options: >-
         --privileged
         --env "HOME=/home/runner"
@@ -404,7 +423,7 @@ jobs:
           node -e "console.log(require('./build/Release/hello.node').hello())"
 
 
-  test-playwright:
+  test-playwright-usage:
     runs-on: ubuntu-latest
     needs: [github-context, build-playwright-dood, build-playwright-dind]
     timeout-minutes: 5
@@ -414,7 +433,7 @@ jobs:
         os: [ubuntu]
         mode: [dood, dind]
     container:
-      image: jclaveau/${{ matrix.os }}-${{ matrix.mode }}-playwright:${{ needs.github-context.outputs.tag }}
+      image: jclaveau/${{ matrix.os }}-${{ matrix.mode }}-playwright:${{ needs.github-context.outputs.build_tag }}
       options: >-
         --privileged
         --env "HOME=/home/runner"
@@ -434,3 +453,43 @@ jobs:
 
       - run: pnpm playwright test
         working-directory: playwright
+
+
+  # ----------------------------------------------------------------------------
+  # Promote: the all-or-nothing publish gate. `needs` every test job, so a single
+  # failure skips this job entirely and nothing consumer-facing is published. On
+  # success it adds the consumer tags (latest / pr-<n>) to the exact digests that
+  # were tested — server-side retag via imagetools, no pull/rebuild.
+  # ----------------------------------------------------------------------------
+
+  promote:
+    runs-on: ubuntu-latest
+    needs: [github-context, test-base-usage, test-base-effects, test-pnpm-usage, test-playwright-usage]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        os: [ubuntu]
+        image: [dood, dind, dood-pnpm, dind-pnpm, dood-playwright, dind-playwright]
+    steps:
+      - uses: docker/setup-buildx-action@v3
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-${{ matrix.image }}
+          tags: |
+            type=ref,event=pr
+            type=raw,value=latest,enable=${{ github.event_name != 'pull_request' }}
+            type=sha,prefix={{branch}}-
+            type=ref,event=branch
+            type=semver,pattern={{version}}
+      - name: Promote tested digest to consumer tags
+        run: |
+          docker buildx imagetools create \
+            $(jq -cr '.tags | map("-t " + .) | join(" ")' <<< "$DOCKER_METADATA_OUTPUT_JSON") \
+            ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-${{ matrix.image }}:${{ needs.github-context.outputs.build_tag }}
