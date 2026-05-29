@@ -48,14 +48,90 @@ jobs:
 
 
   # ----------------------------------------------------------------------------
-  # Builds: per layer, the dood image then the dind overlay on top of it.
-  # `dind` = `dood` + the ./dind overlay (start-dockerd); installs live only in dood.
+  # Builds: a shared, unpublished `docker` base (ubuntu-gha-tools + docker/compose), then TWO
+  # symmetric, independent chains built in parallel — each layer's dood and dind build side by side:
+  #   dood: docker -> dood -> dood-node -> dood-pnpm -> dood-playwright
+  #   dind: docker -> dind -> dind-node -> dind-pnpm -> dind-playwright
+  # The only difference is the base: `dind` applies the ./dind overlay (start-dockerd) once, then both
+  # chains install node/pnpm/playwright the same way (./node, ./pnpm, ./playwright). The layers are
+  # re-installed per chain on purpose — the symmetric, easy-to-follow graph matters more than dedup
+  # (CI is free on open source).
   # Matrix `os` is currently [ubuntu]; adding alpine = extend the list (+ os-specific dirs).
   # ----------------------------------------------------------------------------
 
-  build-base-dood:
+  build-gha-tools:
     runs-on: ubuntu-latest
     needs: github-context
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        os: [ubuntu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-flags: --debug
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-gha-tools
+          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
+          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./ubuntu-gha-tools
+          push: true # PRs push too so downstream jobs can pull this exact build
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-gha-tools:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-gha-tools:buildcache,mode=max
+
+  # Unpublished shared base: ubuntu-gha-tools + docker/compose. Only ever pushed under the
+  # throwaway build tag (never promoted); dood and dind are built from it in parallel.
+  build-docker:
+    runs-on: ubuntu-latest
+    needs: [github-context, build-gha-tools]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        os: [ubuntu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-flags: --debug
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-docker
+          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./docker
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-gha-tools:${{ needs.github-context.outputs.build_tag }}
+            DOCKER_GROUP_ID=${{ needs.github-context.outputs.docker_group_id }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-docker:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-docker:buildcache,mode=max
+
+  build-dood:
+    runs-on: ubuntu-latest
+    needs: [github-context, build-docker]
     permissions:
       contents: read
       packages: write
@@ -79,18 +155,18 @@ jobs:
           tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
       - uses: docker/build-push-action@v5
         with:
-          context: ./base
-          push: true # PRs push too so test jobs can pull this exact build
+          context: ./dood
+          push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            DOCKER_GROUP_ID=${{ needs.github-context.outputs.docker_group_id }}
+            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-docker:${{ needs.github-context.outputs.build_tag }}
           cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood:buildcache,mode=max
 
-  build-base-dind:
+  build-dind:
     runs-on: ubuntu-latest
-    needs: [github-context, build-base-dood]
+    needs: [github-context, build-docker]
     permissions:
       contents: read
       packages: write
@@ -119,14 +195,14 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood:${{ needs.github-context.outputs.build_tag }}
+            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-docker:${{ needs.github-context.outputs.build_tag }}
           cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind:buildcache,mode=max
 
 
   build-node-dood:
     runs-on: ubuntu-latest
-    needs: [github-context, build-base-dood]
+    needs: [github-context, build-dood]
     permissions:
       contents: read
       packages: write
@@ -161,7 +237,7 @@ jobs:
 
   build-node-dind:
     runs-on: ubuntu-latest
-    needs: [github-context, build-node-dood]
+    needs: [github-context, build-dind]
     permissions:
       contents: read
       packages: write
@@ -185,12 +261,12 @@ jobs:
           tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
       - uses: docker/build-push-action@v5
         with:
-          context: ./dind
+          context: ./node
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-node:${{ needs.github-context.outputs.build_tag }}
+            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind:${{ needs.github-context.outputs.build_tag }}
           cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-node:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-node:buildcache,mode=max
 
@@ -232,7 +308,7 @@ jobs:
 
   build-pnpm-dind:
     runs-on: ubuntu-latest
-    needs: [github-context, build-pnpm-dood]
+    needs: [github-context, build-node-dind]
     permissions:
       contents: read
       packages: write
@@ -256,12 +332,12 @@ jobs:
           tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
       - uses: docker/build-push-action@v5
         with:
-          context: ./dind
+          context: ./pnpm
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-pnpm:${{ needs.github-context.outputs.build_tag }}
+            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-node:${{ needs.github-context.outputs.build_tag }}
           cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-pnpm:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-pnpm:buildcache,mode=max
 
@@ -303,7 +379,7 @@ jobs:
 
   build-playwright-dind:
     runs-on: ubuntu-latest
-    needs: [github-context, build-playwright-dood]
+    needs: [github-context, build-pnpm-dind]
     permissions:
       contents: read
       packages: write
@@ -327,12 +403,12 @@ jobs:
           tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
       - uses: docker/build-push-action@v5
         with:
-          context: ./dind
+          context: ./playwright
           push: true
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-playwright:${{ needs.github-context.outputs.build_tag }}
+            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-pnpm:${{ needs.github-context.outputs.build_tag }}
           cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-playwright:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-playwright:buildcache,mode=max
 
@@ -346,9 +422,32 @@ jobs:
   # tested once, at the base layer.
   # ----------------------------------------------------------------------------
 
-  test-base-usage:
+  test-gha-tools-usage:
     runs-on: ubuntu-latest
-    needs: [github-context, build-base-dood, build-base-dind]
+    needs: [github-context, build-gha-tools]
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu]
+    container:
+      image: jclaveau/${{ matrix.os }}-gha-tools:${{ needs.github-context.outputs.build_tag }}
+    steps:
+      # NB: GitHub runs container-job steps as root (uid 0), ignoring the image's USER, and injects
+      # its own RUNNER_TOOL_CACHE/ImageOS — so we only print those, and assert the image-controlled
+      # facts (the OS version and the curated tools).
+      - name: Image identity (diagnostics)
+        run: |
+          echo "user=$(id -u):$(id -g) ($(whoami))  ImageOS=$ImageOS  RUNNER_TOOL_CACHE=$RUNNER_TOOL_CACHE"
+          . /etc/os-release && echo "os=$PRETTY_NAME"
+      - name: It is Ubuntu 24.04
+        run: . /etc/os-release && test "$VERSION_ID" = "24.04"
+      - name: Curated OS tools are present
+        run: for t in git jq g++ make zip unzip rsync shellcheck python3 sudo; do command -v "$t" >/dev/null || { echo "missing $t"; exit 1; }; done
+
+  test-docker-usage:
+    runs-on: ubuntu-latest
+    needs: [github-context, build-dood, build-dind]
     timeout-minutes: 5
     env:
       # overlay2-on-overlayfs is unstable nested in GHA container jobs; fuse-overlayfs gives
@@ -393,9 +492,9 @@ jobs:
         run: docker compose -f ./docker-compose-tests.yaml up -d --wait
 
 
-  test-base-effects:
+  test-docker-effects:
     runs-on: ubuntu-latest
-    needs: [github-context, build-base-dood, build-base-dind]
+    needs: [github-context, build-dood, build-dind]
     timeout-minutes: 5
     env:
       DOCKER_STORAGE_DRIVER: fuse-overlayfs
@@ -550,9 +649,9 @@ jobs:
   # path. Runs on a plain runner (not a container job) so act can drive Docker.
   # ----------------------------------------------------------------------------
 
-  test-base-act:
+  test-docker-act:
     runs-on: ubuntu-latest
-    needs: [github-context, build-base-dood, build-base-dind]
+    needs: [github-context, build-dood, build-dind]
     timeout-minutes: 10
     strategy:
       fail-fast: false
@@ -627,14 +726,14 @@ jobs:
 
   promote:
     runs-on: ubuntu-latest
-    needs: [github-context, versions, test-base-usage, test-base-effects, test-base-act, test-node-usage, test-pnpm-usage, test-playwright-usage]
+    needs: [github-context, versions, test-gha-tools-usage, test-docker-usage, test-docker-effects, test-docker-act, test-node-usage, test-pnpm-usage, test-playwright-usage]
     permissions:
       contents: read
       packages: write
     strategy:
       matrix:
         os: [ubuntu]
-        image: [dood, dind, dood-node, dind-node, dood-pnpm, dind-pnpm, dood-playwright, dind-playwright]
+        image: [gha-tools, dood, dind, dood-node, dind-node, dood-pnpm, dind-pnpm, dood-playwright, dind-playwright]
     steps:
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
@@ -650,7 +749,7 @@ jobs:
           PW: ${{ needs.versions.outputs.pw }}
         run: |
           case "${{ matrix.image }}" in
-            dood|dind)                       TAG="${OS}";;
+            gha-tools|dood|dind)             TAG="${OS}";;
             dood-node|dind-node)             TAG="${OS}-${NODE}";;
             dood-pnpm|dind-pnpm)             TAG="${OS}-${NODE}-${PNPM}";;
             dood-playwright|dind-playwright) TAG="${OS}-${NODE}-${PNPM}-${PW}";;

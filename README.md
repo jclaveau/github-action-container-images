@@ -21,11 +21,13 @@ Each image comes in two flavors:
   ```
   Set `DOCKER_HOST` via the container `--env` (not `$GITHUB_ENV` — that would leak to GHA's host-side post-job cleanup and fail it). For `docker run` / `act` the `ENTRYPOINT` boots it automatically. Pick a nested-friendly storage driver with `DOCKER_STORAGE_DRIVER` (`fuse-overlayfs` is fast and works on GitHub-hosted runners; `vfs` is the always-works fallback) — overlay2 is unstable nested.
 
-Images are named `<os>-<mode>[-<layer>]` (`os` ∈ {`ubuntu`}, `mode` ∈ {`dood`,`dind`}):
+The variant images are named `<os>-<mode>[-<layer>]` (`os` ∈ {`ubuntu`}, `mode` ∈ {`dood`,`dind`}); they
+build on a shared, published `ubuntu-gha-tools` foundation (and an internal, unpublished `ubuntu-docker`):
 
 | Image | Contents |
 | --- | --- |
-| `ubuntu-dood`, `ubuntu-dind` | [Ubuntu 24.04](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md) + [DinD](https://www.docker.com/resources/docker-in-docker-containerized-ci-workflows-dockercon-2023/) tooling |
+| `ubuntu-gha-tools` | [Ubuntu 24.04](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md) mimicking GitHub's `ubuntu-latest` (users, env, OS-level tools; **no docker, no runtimes**) |
+| `ubuntu-dood`, `ubuntu-dind` | + Docker Engine & Compose ([DinD](https://www.docker.com/resources/docker-in-docker-containerized-ci-workflows-dockercon-2023/) tooling); `dood` shares the host daemon, `dind` boots its own |
 | `ubuntu-dood-node`, `ubuntu-dind-node` | + Node, npm and node-gyp build tools (python3, make, g++) |
 | `ubuntu-dood-pnpm`, `ubuntu-dind-pnpm` | + pnpm |
 | `ubuntu-dood-playwright`, `ubuntu-dind-playwright` | + Playwright |

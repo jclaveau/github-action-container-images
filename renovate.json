@@ -38,7 +38,7 @@
   "customManagers": [
     {
       "customType": "regex",
-      "fileMatch": ["^base/Dockerfile$"],
+      "fileMatch": ["^docker/Dockerfile$"],
       "matchStrings": [
         "ARG DOCKER_VERSION=(?<currentValue>.*?)\\n"
       ],
@@ -48,7 +48,7 @@
     },
     {
       "customType": "regex",
-      "fileMatch": ["^base/Dockerfile$"],
+      "fileMatch": ["^docker/Dockerfile$"],
       "matchStrings": [
         "ARG DOCKER_COMPOSE_VERSION=(?<currentValue>.*?)\\n"
       ],
