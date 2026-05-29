@@ -1,40 +1,46 @@
-# WIP: Github Actions Container Images
+# Github Actions Container Images
 
 [![Test and Publish](https://github.com/jclaveau/github-action-container-images/actions/workflows/test-and-publish.yml/badge.svg)](https://github.com/jclaveau/github-action-container-images/actions/workflows/test-and-publish.yml)
 
+Prebuilt container images for GitHub Actions that **speed up CI** by shipping common dependencies
+preinstalled, while mimicking the default `ubuntu-latest` environment (so `docker compose` and friends
+just work). Use one as a job [`container:`](https://docs.github.com/en/actions/how-tos/write-workflows/choose-where-workflows-run/run-jobs-in-a-container).
+
 ## Goals
-- [ ] Prepare images with installed dependencies to speedup CI
-- [ ] Provide an environment similar to the default context `ubuntu-latest` (allowing using `docker compose`)
+- [ ] Prepare images with installed dependencies to speed up CI
+- [ ] Provide an environment similar to the default `ubuntu-latest` (allowing `docker compose`)
 
-### Implemented
+## The big picture
 
-Each image comes in two flavors:
+Images are layered — each builds on the previous — and every layer above the base ships in two
+**flavors**, `-dood` and `-dind`:
 
-- **`-dood`** (Docker-outside-of-Docker): the `docker` CLI talks to a shared **host** daemon. Mount the host socket (`-v /var/run/docker.sock:/var/run/docker.sock`). Lighter, but bind mounts from inside resolve against the *host* filesystem.
-- **`-dind`** (true Docker-in-Docker): boots its own inner `dockerd` on a dedicated socket (`/var/run/dind.sock`), so bind mounts resolve in the container's own namespace. Needs `--privileged`. In GitHub Actions container jobs the image `ENTRYPOINT` is overridden (and the host socket is bind-mounted), so start the daemon as the first step and point clients at it via the container `--env`:
-  ```yaml
-  container:
-    image: jclaveau/ubuntu-dind:latest
-    options: --privileged --env DOCKER_HOST=unix:///var/run/dind.sock
-  steps:
-    - run: start-dockerd   # boots the inner daemon; it persists across the job's steps
-  ```
-  Set `DOCKER_HOST` via the container `--env` (not `$GITHUB_ENV` — that would leak to GHA's host-side post-job cleanup and fail it). For `docker run` / `act` the `ENTRYPOINT` boots it automatically. Pick a nested-friendly storage driver with `DOCKER_STORAGE_DRIVER` (`fuse-overlayfs` is fast and works on GitHub-hosted runners; `vfs` is the always-works fallback) — overlay2 is unstable nested.
+```
+ubuntu-gha-tools            GitHub ubuntu-latest mimic (users, env, OS tools)
+  └─ docker  (internal)     + Docker Engine & Compose
+       ├─ dood              shares the host daemon (mounted socket)
+       └─ dind              boots its own inner daemon
+            then:  node  →  pnpm  →  playwright      (each in both -dood and -dind)
+```
 
-The variant images are named `<os>-<mode>[-<layer>]` (`os` ∈ {`ubuntu`}, `mode` ∈ {`dood`,`dind`}); they
-build on a shared, published `ubuntu-gha-tools` foundation (and an internal, unpublished `ubuntu-docker`):
+Variant images are named `<os>-<mode>[-<layer>]` (`os` ∈ {`ubuntu`}, `mode` ∈ {`dood`,`dind`}). Each
+layer is documented on its own:
 
-| Image | Contents |
-| --- | --- |
-| `ubuntu-gha-tools` | [Ubuntu 24.04](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md) mimicking GitHub's `ubuntu-latest` (users, env, OS-level tools; **no docker, no runtimes**) |
-| `ubuntu-dood`, `ubuntu-dind` | + Docker Engine & Compose ([DinD](https://www.docker.com/resources/docker-in-docker-containerized-ci-workflows-dockercon-2023/) tooling); `dood` shares the host daemon, `dind` boots its own |
-| `ubuntu-dood-node`, `ubuntu-dind-node` | + Node, npm and node-gyp build tools (python3, make, g++) |
-| `ubuntu-dood-pnpm`, `ubuntu-dind-pnpm` | + pnpm |
-| `ubuntu-dood-playwright`, `ubuntu-dind-playwright` | + Playwright |
+| Image | What it adds | Docs |
+| --- | --- | --- |
+| `ubuntu-gha-tools` | GitHub `ubuntu-latest` mimic (users, env, OS tools) | [README](ubuntu-gha-tools/README.md) |
+| `ubuntu-dood` / `ubuntu-dind` | + Docker Engine & Compose (the two flavors) | [dood](dood/README.md) · [dind](dind/README.md) |
+| `…-node` | + Node, npm, node-gyp build tools | [README](node/README.md) |
+| `…-pnpm` | + pnpm | [README](pnpm/README.md) |
+| `…-playwright` | + Playwright | [README](playwright/README.md) |
 
-Besides `latest`, each push to `main` also publishes a **version-pinned** tag (OS + the minor of each tool it carries), e.g. `ubuntu-dood-node:ubuntu24.04-node22.12`, `ubuntu-dood-pnpm:ubuntu24.04-node22.12-pnpm9.15`, `ubuntu-dood-playwright:ubuntu24.04-node22.12-pnpm9.15-pw1.50`.
+(The `docker` layer is an internal, unpublished base — see [docker/README.md](docker/README.md).)
 
-#### `-dood` vs `-dind`
+Each push to `main` runs the full test suite and, **only if every test passes**, publishes `latest`
+plus a **version-pinned** tag capturing the OS + tool minors, e.g.
+`ubuntu-dood-playwright:ubuntu24.04-node22.12-pnpm9.15-pw1.50`.
+
+## The two flavors
 
 | Aspect | `-dood` (Docker-outside-of-Docker) | `-dind` (true Docker-in-Docker) |
 | --- | --- | --- |
@@ -54,43 +60,10 @@ Besides `latest`, each push to `main` also publishes a **version-pinned** tag (O
 | Isolation / security | socket access ≈ control of the host daemon (root-equivalent on the host) | `--privileged` (kernel-level power), but fully isolated state |
 | With `act` (local) | uses your local Docker → test containers mix with your own; possible name/port clashes; Docker-Desktop/rootless path quirks | self-contained; if overlay2 nesting fails on your backend set `DOCKER_STORAGE_DRIVER=vfs`; no clashes with your local containers |
 
-#### Example: Postgres via `docker compose` in a job
+See [dood/README.md](dood/README.md) and [dind/README.md](dind/README.md) for the runtime details and
+`docker compose` usage examples.
 
-**`ubuntu-dood`** — uses the host daemon (GHA bind-mounts its socket); published ports land on the host, reached via `host.docker.internal`:
-
-```yaml
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    container:
-      image: jclaveau/ubuntu-dood:latest
-      options: --privileged --add-host=host.docker.internal:host-gateway
-    steps:
-      - uses: actions/checkout@v4
-      - run: docker compose -f docker-compose-tests.yaml up -d --wait
-      - run: nc -zv host.docker.internal 5432
-```
-
-**`ubuntu-dind`** — boots its own daemon first; published ports land on the job container, reached via `localhost`:
-
-```yaml
-jobs:
-  test:
-    runs-on: ubuntu-latest
-    container:
-      image: jclaveau/ubuntu-dind:latest
-      # DOCKER_HOST via --env (not $GITHUB_ENV) so it never leaks to GHA's host-side cleanup
-      options: --privileged --env DOCKER_HOST=unix:///var/run/dind.sock
-    env:
-      DOCKER_STORAGE_DRIVER: fuse-overlayfs   # fast nested CoW; use vfs if your runner lacks /dev/fuse
-    steps:
-      - run: start-dockerd            # boots the inner daemon (persists across the steps below)
-      - uses: actions/checkout@v4
-      - run: docker compose -f docker-compose-tests.yaml up -d --wait
-      - run: nc -zv localhost 5432
-```
-
-### Todo
+## Todo
 - Check [the issues](https://github.com/jclaveau/github-action-container-images/issues)
 
 ## License
