@@ -1,5 +1,7 @@
 # syntax=docker/dockerfile:1
-FROM ubuntu:24.04
+# Canonical's official Ubuntu from AWS ECR Public (NOT Docker Hub) to avoid Docker Hub's pull rate
+# limit in CI: the rest of the pipeline builds/pulls via GHCR, so CI does zero Docker Hub pulls.
+FROM public.ecr.aws/ubuntu/ubuntu:24.04
 
 # Mimics GitHub's ubuntu-latest VM environment (accounts, env, OS-level tooling) per issue #5.
 # Deliberately NO docker and NO language runtimes — those live in the docker/ overlay and the
