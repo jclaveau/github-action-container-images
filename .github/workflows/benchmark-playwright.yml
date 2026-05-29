@@ -1,0 +1,428 @@
+name: Benchmark Playwright
+
+# Quantifies "time until Playwright tests start" across four setups, to show what our prebuilt
+# *-playwright images save vs installing from scratch. Every run benchmarks BOTH browser modes —
+# chromium-only and the full set (chromium+firefox+webkit) — and each scenario runs 10×, so the summary
+# reports mean ± 95% margin of error (Student's t). The same scenarios are also run through nektos/act
+# (each image used as a local act runner) and shown in a separate "Via act" table.
+# (alpine-* images are Chromium-only — no firefox/webkit on musl — so they only appear in chromium tables.
+#  Our images are compared in both dood and dind flavors.)
+# TODO: narrow the push trigger to fire when Renovate bumps the image versions (e.g. path filter on the
+# Dockerfiles or on the Renovate update merges), so the numbers track the images that actually changed.
+
+on:
+  push:
+    branches: [main]
+  workflow_dispatch:
+    inputs:
+      pw_version:
+        description: Playwright version to benchmark (must match the published image tags)
+        default: '1.50.1'
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  # Emits the container matrix as JSON so the official image tag can embed the chosen Playwright version
+  # (a static matrix.include can't reference inputs). Each scenario runs in both browser modes; alpine is
+  # Chromium-only, so it gets a single cell.
+  config:
+    runs-on: ubuntu-latest
+    outputs:
+      matrix: ${{ steps.c.outputs.matrix }}
+    steps:
+      - id: c
+        run: |
+          PW="${{ github.event.inputs.pw_version || '1.50.1' }}"
+          OFFICIAL="mcr.microsoft.com/playwright:v${PW}-noble"
+          HOME_OPT="--env HOME=/home/runner"
+          # Each base cell is repeated 10× (run 1..10) so the summary can aggregate (mean ± 95% MoE).
+          MATRIX="$(jq -cn --arg off "$OFFICIAL" --arg h "$HOME_OPT" '
+            [ {scenario:"official",    image:$off, options:"--env HOME=/root", browsers:"chromium"},
+              {scenario:"official",    image:$off, options:"--env HOME=/root", browsers:"all"},
+              {scenario:"ubuntu-dood", image:"jclaveau/ubuntu-dood-playwright:latest", options:$h, browsers:"chromium"},
+              {scenario:"ubuntu-dood", image:"jclaveau/ubuntu-dood-playwright:latest", options:$h, browsers:"all"},
+              {scenario:"ubuntu-dind", image:"jclaveau/ubuntu-dind-playwright:latest", options:$h, browsers:"chromium"},
+              {scenario:"ubuntu-dind", image:"jclaveau/ubuntu-dind-playwright:latest", options:$h, browsers:"all"},
+              {scenario:"alpine-dood", image:"jclaveau/alpine-dood-playwright:latest", options:$h, browsers:"chromium"},
+              {scenario:"alpine-dind", image:"jclaveau/alpine-dind-playwright:latest", options:$h, browsers:"chromium"} ] as $base
+            | {include: [ $base[] as $b | range(1;11) as $r | $b + {run:$r} ]}')"
+          echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
+
+  # The thing we're beating: a bare runner installing Playwright + browsers + system deps from scratch.
+  baseline:
+    name: bench-baseline-${{ matrix.browsers }}-${{ matrix.run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix:
+        browsers: [chromium, all]
+        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '22'   # no cache: we measure the cold install on purpose
+      - name: Ensure pnpm
+        run: npm install -g pnpm@9
+      - name: Install project deps
+        working-directory: playwright
+        run: pnpm install
+      - name: Install Playwright browsers + system deps
+        working-directory: playwright
+        run: |
+          # empty browser arg installs every browser; otherwise just chromium
+          [ "${{ matrix.browsers }}" = "all" ] && B="" || B="chromium"
+          pnpm exec playwright install --with-deps $B
+      - name: Run Playwright tests
+        working-directory: playwright
+        run: |
+          if [ "${{ matrix.browsers }}" = "all" ]; then
+            P="--project=chromium --project=firefox --project=webkit"
+          else
+            P="--project=chromium"
+          fi
+          pnpm exec playwright test $P
+
+  # Container scenarios: the official MS image and our two published images, each in both browser modes.
+  container:
+    name: bench-${{ matrix.scenario }}-${{ matrix.browsers }}-${{ matrix.run }}
+    needs: config
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    strategy:
+      fail-fast: false
+      matrix: ${{ fromJSON(needs.config.outputs.matrix) }}
+    container:
+      image: ${{ matrix.image }}
+      options: ${{ matrix.options }}
+    steps:
+      - uses: actions/checkout@v4
+      - name: Ensure pnpm
+        run: command -v pnpm || npm install -g pnpm@9   # no-op on our images; installs on the MS image
+      - name: Install project deps
+        working-directory: playwright
+        run: pnpm install
+      - name: Run Playwright tests
+        working-directory: playwright
+        run: |
+          # The official MS image runs as root, but GHA forces HOME=/github/home (owned by pwuser);
+          # Firefox/WebKit refuse to launch unless $HOME is owned by the current user, so point root at /root.
+          [ "${{ matrix.scenario }}" = "official" ] && export HOME=/root
+          # Alpine's config only defines the chromium project, so never ask it for firefox/webkit.
+          if [[ "${{ matrix.scenario }}" == alpine-* ]] || [ "${{ matrix.browsers }}" != "all" ]; then
+            P="--project=chromium"
+          else
+            P="--project=chromium --project=firefox --project=webkit"
+          fi
+          pnpm exec playwright test $P
+
+  # Same benchmark, but executed through nektos/act (the "use these images as your local act runner"
+  # path). act runs inside this hosted job and drives the host Docker, so time-to-tests can't come from
+  # the jobs API — the inner workflow prints a timestamp right before the tests and we measure from the
+  # `act` invocation, writing the result to an artifact the summary picks up. Chromium-only, 3 runs each.
+  act:
+    name: bench-act-${{ matrix.scenario }}-${{ matrix.browsers }}-${{ matrix.run }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    strategy:
+      fail-fast: false
+      matrix:
+        scenario: [baseline, official, ubuntu-dood, ubuntu-dind, alpine-dood, alpine-dind]
+        browsers: [chromium, all]
+        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        exclude:
+          - scenario: alpine-dood   # Chromium-only on musl
+            browsers: all
+          - scenario: alpine-dind
+            browsers: all
+    steps:
+      - uses: actions/checkout@v4
+      - name: Install act
+        run: |
+          curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/nektos/act/master/install.sh \
+            | sudo bash -s -- -b /usr/local/bin
+          act --version
+      - name: Resolve runner image
+        id: img
+        run: |
+          PW="${{ github.event.inputs.pw_version || '1.50.1' }}"
+          case "${{ matrix.scenario }}" in
+            baseline)    IMG="catthehacker/ubuntu:act-22.04" ;;
+            official)    IMG="mcr.microsoft.com/playwright:v${PW}-noble" ;;
+            ubuntu-dood) IMG="jclaveau/ubuntu-dood-playwright:latest" ;;
+            ubuntu-dind) IMG="jclaveau/ubuntu-dind-playwright:latest" ;;
+            alpine-dood) IMG="jclaveau/alpine-dood-playwright:latest" ;;
+            alpine-dind) IMG="jclaveau/alpine-dind-playwright:latest" ;;
+          esac
+          echo "image=$IMG" >> "$GITHUB_OUTPUT"
+      - name: Benchmark via act
+        run: |
+          IMG="${{ steps.img.outputs.image }}"
+          OUT="act-${{ matrix.scenario }}-${{ matrix.browsers }}-${{ matrix.run }}.json"
+          START=$(date +%s.%N)
+          set +e
+          act push -W .github/act/bench.yml --bind \
+            -P ubuntu-latest="$IMG" \
+            --env SCENARIO="${{ matrix.scenario }}" --env BROWSERS="${{ matrix.browsers }}" 2>&1 | tee act.log
+          rc=${PIPESTATUS[0]}
+          set -e
+          END=$(date +%s.%N)
+          STEP_START=$(grep -aoE 'ACT_STEP_START=[0-9.]+' act.log | head -1 | cut -d= -f2)
+          TEST_START=$(grep -aoE 'ACT_TEST_START=[0-9.]+' act.log | head -1 | cut -d= -f2)
+          TEST_END=$(grep -aoE 'ACT_TEST_END=[0-9.]+' act.log | head -1 | cut -d= -f2)
+          python3 - "$START" "$END" "$STEP_START" "$TEST_START" "$TEST_END" "$rc" "$OUT" "${{ matrix.scenario }}" "${{ matrix.browsers }}" <<'PY'
+          import json, sys
+          start, end, step, tstart, tend, rc, out, sc, mode = sys.argv[1:10]
+          f = lambda x: float(x) if x else None
+          start, end, step, tstart, tend = float(start), float(end), f(step), f(tstart), f(tend)
+          rec = {"scenario": sc, "mode": mode, "rc": int(rc), "total": end - start}
+          rec["pull"] = (step - start) if step else None              # incl. act start-up + image pull
+          rec["install"] = (tstart - step) if (tstart and step) else None
+          rec["ttt"] = (tstart - start) if tstart else None
+          rec["test"] = (tend - tstart) if (tend and tstart) else None
+          json.dump(rec, open(out, "w"))
+          print(rec)
+          PY
+          test "$rc" -eq 0 && test -n "$TEST_START"
+      - name: Upload act result
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: act-${{ matrix.scenario }}-${{ matrix.browsers }}-${{ matrix.run }}
+          path: act-${{ matrix.scenario }}-${{ matrix.browsers }}-${{ matrix.run }}.json
+          if-no-files-found: ignore
+
+  # Read GitHub's own per-step timings (hosted scenarios) + the act artifacts, and render the summary.
+  summary:
+    needs: [baseline, container, act]
+    if: always()
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+      actions: read
+    steps:
+      - name: Download act results
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: act-*
+          path: act-results
+          merge-multiple: true
+      - name: Collect timings and write summary
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh api --paginate "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" --jq '.jobs[]' > jobs.ndjson
+          python3 - <<'PY'
+          import json, os, glob, statistics
+          from collections import defaultdict
+          from datetime import datetime
+
+          def ts(s):
+              return datetime.fromisoformat(s.replace("Z", "+00:00"))
+
+          def dur(a, b):
+              return (ts(b) - ts(a)).total_seconds() if a and b else None
+
+          def fmt(x):
+              return "—" if x is None else f"{x:.0f}s"
+
+          INSTALL = {"Install project deps", "Install Playwright browsers + system deps"}
+          jobs = [json.loads(line) for line in open("jobs.ndjson") if line.strip()]
+
+          agg = defaultdict(lambda: defaultdict(list))   # (scenario, mode) -> metric -> [values per run]
+          oks = defaultdict(lambda: [0, 0])              # (scenario, mode) -> [successful, total]
+          seen = set()
+          for j in jobs:
+              name = j.get("name", "")
+              if not name.startswith("bench-") or name.startswith("bench-act-"):
+                  continue
+              parts = name[len("bench-"):].rsplit("-", 2)   # scenario, mode, run
+              if len(parts) != 3:
+                  continue
+              scenario, mode, _run = parts
+              steps = j.get("steps") or []
+              by = {s.get("name"): s for s in steps}
+              test = by.get("Run Playwright tests", {})
+              init = by.get("Initialize containers", {})
+              install = sum(
+                  d for s in steps if s.get("name") in INSTALL
+                  for d in [dur(s.get("started_at"), s.get("completed_at"))] if d is not None
+              )
+              key = (scenario, mode)
+              seen.add(key)
+              vals = {
+                  "pull": dur(init.get("started_at"), init.get("completed_at")),
+                  "install": install,
+                  "ttt": dur(j.get("started_at"), test.get("started_at")),
+                  "test": dur(test.get("started_at"), test.get("completed_at")),
+                  "total": dur(j.get("started_at"), j.get("completed_at")),
+              }
+              for k, v in vals.items():
+                  if v is not None:
+                      agg[key][k].append(v)
+              oks[key][1] += 1
+              oks[key][0] += 1 if j.get("conclusion") == "success" else 0
+
+          # Student's t (two-sided 95%) by df = n-1; falls back to z for large n.
+          T95 = {1: 12.706, 2: 4.303, 3: 3.182, 4: 2.776, 5: 2.571, 6: 2.447,
+                 7: 2.365, 8: 2.306, 9: 2.262, 10: 2.228}
+
+          def mean_of(xs):
+              xs = [x for x in xs if x is not None]
+              return statistics.fmean(xs) if xs else None
+
+          def stats95(xs):
+              # (mean, sample SD (n-1), 95% margin of error) — SD/MoE are None when n < 2
+              xs = [x for x in xs if x is not None]
+              if not xs:
+                  return None
+              m = statistics.fmean(xs)
+              if len(xs) < 2:
+                  return (m, None, None)
+              s = statistics.stdev(xs)
+              t = T95.get(len(xs) - 1, 1.96)
+              return (m, s, t * s / len(xs) ** 0.5)
+
+          def ttt_cell(xs):
+              st = stats95(xs)
+              if st is None:
+                  return "—", None
+              m, sd, moe = st
+              return (f"{m:.0f}s" if moe is None else f"{m:.0f}s ± {moe:.0f}s"), m
+
+          def cv(xs):
+              st = stats95(xs)
+              return (st[1] / st[0] * 100) if (st and st[1] is not None and st[0]) else None
+
+          def delta_cell(m, base, cv_xs):
+              # Δ seconds (carrying the CV of the underlying metric) + Δ %
+              if m is None or not base:
+                  return "—", "—"
+              d = m - base
+              ds = f"{'−' if d < 0 else '+'}{abs(d):.0f}s"
+              c = cv(cv_xs)
+              if c is not None:
+                  ds += f" (CV {c:.0f}%)"
+              return ds, f"{'−' if d < 0 else '+'}{abs(d / base * 100):.0f}%"
+
+          order = ["baseline", "official", "ubuntu-dood", "ubuntu-dind", "alpine-dood", "alpine-dind"]
+          LABEL = {
+              "baseline": "manual install",
+              "official": "official container",
+              "ubuntu-dood": "ubuntu-dood-playwright",
+              "ubuntu-dind": "ubuntu-dind-playwright",
+              "alpine-dood": "alpine-dood-playwright",
+              "alpine-dind": "alpine-dind-playwright",
+          }
+
+          def table(mode, title):
+              bs = stats95(agg[("baseline", mode)]["ttt"])
+              base = bs[0] if bs else None
+              out = [
+                  f"### {title}",
+                  "",
+                  "| Scenario | Runs OK | Image pull | Install (deps+browsers) | Time-to-tests (mean ± 95% MoE) | Test run | Total | Δ vs manual install | Δ % |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+              ]
+              for sc in order:
+                  key = (sc, mode)
+                  if key not in seen:
+                      continue
+                  cell, m = ttt_cell(agg[key]["ttt"])
+                  d, p = ("—", "—") if sc == "baseline" else delta_cell(m, base, agg[key]["ttt"])
+                  ok, n = oks[key]
+                  out.append(
+                      f"| {LABEL.get(sc, sc)} | {ok}/{n} | {fmt(mean_of(agg[key]['pull']))} | {fmt(mean_of(agg[key]['install']))} "
+                      f"| {cell} | {fmt(mean_of(agg[key]['test']))} | {fmt(mean_of(agg[key]['total']))} | {d} | {p} |"
+                  )
+              return "\n".join(out)
+
+          # ---- act scenarios, from uploaded artifacts (self-measured time-to-tests) ----
+          act = defaultdict(lambda: defaultdict(list))
+          act_ok = defaultdict(lambda: [0, 0])
+          act_seen = set()
+          for af in sorted(glob.glob("act-results/*.json")):
+              try:
+                  rec = json.load(open(af))
+              except Exception:
+                  continue
+              sc, mode = rec.get("scenario"), rec.get("mode")
+              if not sc or not mode:
+                  continue
+              key = (sc, mode)
+              act_seen.add(key)
+              for k in ("pull", "install", "ttt", "test", "total"):
+                  if rec.get(k) is not None:
+                      act[key][k].append(rec[k])
+              act_ok[key][1] += 1
+              act_ok[key][0] += 1 if rec.get("rc") == 0 else 0
+
+          def act_table(mode, title):
+              bkey = ("baseline", mode)
+              bs = stats95(act[bkey]["ttt"])
+              base = bs[0] if bs else None
+              warm_base = mean_of(act[bkey]["install"])   # time-to-tests minus the image pull
+              out = [
+                  f"### {title}",
+                  "",
+                  "| Scenario | Runs OK | Image pull | Install (deps+browsers) | Time-to-tests (mean ± 95% MoE) | Test run | Total | Δ vs manual install | Δ % | Δ warm (cached image) | Δ % warm |",
+                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
+              ]
+              for sc in order:
+                  key = (sc, mode)
+                  if key not in act_seen:
+                      continue
+                  cell, m = ttt_cell(act[key]["ttt"])
+                  warm_m = mean_of(act[key]["install"])
+                  if sc == "baseline":
+                      d, p, wd, wp = "—", "—", "—", "—"
+                  else:
+                      d, p = delta_cell(m, base, act[key]["ttt"])
+                      wd, wp = delta_cell(warm_m, warm_base, act[key]["install"])
+                  ok, n = act_ok[key]
+                  out.append(
+                      f"| {LABEL.get(sc, sc)} | {ok}/{n} | {fmt(mean_of(act[key]['pull']))} | {fmt(mean_of(act[key]['install']))} "
+                      f"| {cell} | {fmt(mean_of(act[key]['test']))} | {fmt(mean_of(act[key]['total']))} | {d} | {p} | {wd} | {wp} |"
+                  )
+              return "\n".join(out)
+
+          parts = [
+              "## Playwright cold-start benchmark",
+              "",
+              "Each scenario runs 10×; timing columns are **means** across the runs, and Time-to-tests is "
+              "reported as **mean ± 95% margin of error** (Student's t on the n−1 sample SD). The Δ columns "
+              "carry the **CV** (coefficient of variation = SD ÷ mean) of the underlying metric — for act, "
+              "the cold and warm Δ show different CVs because the image pull adds noise. "
+              "**Time-to-tests** = job start → the moment `playwright test` begins (queue excluded). "
+              "*Image pull* is the `Initialize containers` step; *Install* is the runtime dep/browser "
+              "install that the prebuilt images bake in. Δ vs manual install is the time earned (− = faster).",
+              "",
+              "**Reading the CV** (rule of thumb): ≤5% tight · ≤10% good · 10–20% noisy · "
+              ">20% unreliable — treat the mean with caution.",
+              "",
+              table("chromium", "Chromium only"),
+              "",
+              table("all", "All browsers (chromium + firefox + webkit)"),
+              "",
+              act_table("chromium", "Via act — Chromium only (local nektos/act runner)"),
+              "",
+              act_table("all", "Via act — All browsers (local nektos/act runner)"),
+              "",
+              "_`alpine-dood-playwright` and `alpine-dind-playwright` are Chromium-only (no Firefox/WebKit on musl). The **act** tables run each "
+              "image as a local `nektos/act` runner, self-measured from `act` start; their *Image pull* "
+              "also includes act's own start-up overhead, so it isn't directly comparable to the hosted "
+              "`Initialize containers` time. The **warm** Δ columns exclude the pull (= install only) — "
+              "what you actually wait on repeat local runs, where act has the image cached._",
+          ]
+          text = "\n".join(parts) + "\n"
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as f:
+              f.write(text)
+          print(text)
+          PY

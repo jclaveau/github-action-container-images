@@ -1,0 +1,32 @@
+# Inner workflow executed by nektos/act for the benchmark's "act" scenarios — see
+# .github/workflows/benchmark-playwright.yml. It deliberately lives OUTSIDE .github/workflows/ so GitHub
+# never runs it natively. The outer job picks the runner image via `-P ubuntu-latest=<image>` and passes
+# $SCENARIO (baseline installs Playwright from scratch; the others use the prebuilt image). It prints
+# ACT_TEST_START=<epoch> right before launching the tests so the outer job can measure time-to-tests.
+on: push
+jobs:
+  bench:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Install deps and run Playwright (chromium)
+        working-directory: playwright
+        run: |
+          set -e
+          echo "ACT_STEP_START=$(date +%s.%N)"   # after act's image pull / container start
+          command -v pnpm >/dev/null 2>&1 || npm install -g pnpm@9
+          pnpm install
+          if [ "$BROWSERS" = "all" ]; then
+            PROJECTS="--project=chromium --project=firefox --project=webkit"
+            [ "$SCENARIO" = "baseline" ] && pnpm exec playwright install --with-deps
+          else
+            PROJECTS="--project=chromium"
+            [ "$SCENARIO" = "baseline" ] && pnpm exec playwright install --with-deps chromium
+          fi
+          # official MS image runs as root; Firefox/WebKit need a root-owned $HOME
+          [ "$SCENARIO" = "official" ] && export HOME=/root
+          echo "ACT_TEST_START=$(date +%s.%N)"
+          set +e
+          pnpm exec playwright test $PROJECTS
+          rc=$?
+          echo "ACT_TEST_END=$(date +%s.%N)"
+          exit $rc
