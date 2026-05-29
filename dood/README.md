@@ -1,8 +1,11 @@
-# ubuntu-dood — Docker-outside-of-Docker
+# `{ubuntu,alpine}-dood` — Docker-outside-of-Docker
 
 The [`docker`](../docker/README.md) base used with a **shared host daemon**: the `docker` CLI talks to
 the host's `/var/run/docker.sock`. GitHub Actions bind-mounts that socket into every container job; with
 `docker run` you mount it yourself. See the [`-dood` vs `-dind`](../README.md#the-two-flavors) comparison.
+
+Ships in both OS flavors (`ubuntu-dood`, `alpine-dood`) with identical behavior — the examples below use
+`ubuntu-dood`; swap the prefix for the Alpine build.
 
 ## What it implies
 - **Runtime**: mount the host socket (`-v /var/run/docker.sock:/var/run/docker.sock`); on GHA it's already

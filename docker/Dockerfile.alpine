@@ -1,0 +1,23 @@
+# syntax=docker/dockerfile:1
+ARG BASE_IMAGE=jclaveau/alpine-gha-tools:latest
+FROM ${BASE_IMAGE}
+
+ARG DOCKER_GROUP_ID=${DOCKER_GROUP_ID}
+
+# Alpine counterpart of docker/Dockerfile: Docker Engine + Compose from Alpine's own repos (no
+# docker-ce apt repo, no compose binary download). Unpublished shared base for the dood/dind variants.
+# No daemon.json here: dood ignores a local daemon (host socket), and dind writes its own.
+LABEL org.opencontainers.image.description="alpine-gha-tools + Docker Engine & Compose (shared base for dood/dind)"
+
+RUN echo "Install Docker Engine (dockerd) + CLI + Compose plugin from Alpine's repos" \
+    && sudo apk add --no-cache docker docker-cli-compose iptables \
+    \
+    && echo "Align the docker group GID with GitHub's host GID so dood can reach the mounted host" \
+    && echo "socket. -o allows a duplicate GID (Alpine may already use it for another group)." \
+    && sudo groupadd -f docker \
+    && sudo groupmod -o -g ${DOCKER_GROUP_ID} docker \
+    \
+    && sudo usermod -aG docker runner \
+    && sudo usermod -aG docker packer
+
+VOLUME /var/lib/docker

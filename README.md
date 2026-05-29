@@ -23,8 +23,11 @@ ubuntu-gha-tools            GitHub ubuntu-latest mimic (users, env, OS tools)
             then:  node  →  pnpm  →  playwright      (each in both -dood and -dind)
 ```
 
-Variant images are named `<os>-<mode>[-<layer>]` (`os` ∈ {`ubuntu`}, `mode` ∈ {`dood`,`dind`}). Each
-layer is documented on its own:
+Variant images are named `<os>-<mode>[-<layer>]` (`os` ∈ {`ubuntu`,`alpine`}, `mode` ∈ {`dood`,`dind`}).
+Every layer ships in both OS flavors (e.g. `ubuntu-dood-pnpm` and `alpine-dood-pnpm`); the Alpine images
+mirror the Ubuntu dev environment (same accounts, tooling, and bash sugar like `ll`) on musl. The one
+exception is **Playwright on Alpine**, which is **Chromium-only** (via the system Chromium package —
+Playwright's bundled browsers and Firefox/WebKit have no musl builds). Each layer is documented on its own:
 
 | Image | What it adds | Docs |
 | --- | --- | --- |

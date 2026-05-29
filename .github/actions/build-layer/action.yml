@@ -11,6 +11,10 @@ inputs:
   context:
     description: Docker build context directory, e.g. ./docker
     required: true
+  dockerfile:
+    description: Dockerfile name within the context dir (e.g. Dockerfile.alpine for the Alpine variant)
+    required: false
+    default: Dockerfile
   build_tag:
     description: Run-scoped tag the build is pushed under (e.g. sha-<sha>)
     required: true
@@ -46,6 +50,7 @@ runs:
     - uses: docker/build-push-action@v5
       with:
         context: ${{ inputs.context }}
+        file: ${{ inputs.context }}/${{ inputs.dockerfile }}
         push: true # PRs push too so downstream jobs can pull this exact build
         tags: ${{ steps.meta.outputs.tags }}
         labels: ${{ steps.meta.outputs.labels }}

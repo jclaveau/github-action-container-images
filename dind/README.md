@@ -1,8 +1,11 @@
-# ubuntu-dind — true Docker-in-Docker
+# `{ubuntu,alpine}-dind` — true Docker-in-Docker
 
 The [`docker`](../docker/README.md) base plus an **inner `dockerd`** that boots on its own socket
 `/var/run/dind.sock`, giving the container an isolated daemon. See the
 [`-dood` vs `-dind`](../README.md#the-two-flavors) comparison.
+
+Ships in both OS flavors (`ubuntu-dind`, `alpine-dind`) with identical behavior — the examples below use
+`ubuntu-dind`; swap the prefix for the Alpine build.
 
 ## What it adds
 - [`start-dockerd`](./start-dockerd.sh) — launches the inner daemon and points clients at it.

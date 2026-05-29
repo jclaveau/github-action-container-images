@@ -71,13 +71,13 @@ jobs:
       packages: write
     strategy:
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-layer
         with:
           image: ${{ matrix.os }}-gha-tools
-          context: ./ubuntu-gha-tools
+          context: ./${{ matrix.os }}-gha-tools
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
@@ -91,13 +91,14 @@ jobs:
       packages: write
     strategy:
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-layer
         with:
           image: ${{ matrix.os }}-docker
           context: ./docker
+          dockerfile: ${{ matrix.os == 'alpine' && 'Dockerfile.alpine' || 'Dockerfile' }}
           base_image: ${{ matrix.os }}-gha-tools
           docker_group_id: ${{ needs.github-context.outputs.docker_group_id }}
           build_tag: ${{ needs.github-context.outputs.build_tag }}
@@ -111,7 +112,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-layer
@@ -130,13 +131,14 @@ jobs:
       packages: write
     strategy:
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-layer
         with:
           image: ${{ matrix.os }}-dind
           context: ./dind
+          dockerfile: ${{ matrix.os == 'alpine' && 'Dockerfile.alpine' || 'Dockerfile' }}
           base_image: ${{ matrix.os }}-docker
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -150,13 +152,14 @@ jobs:
       packages: write
     strategy:
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-layer
         with:
           image: ${{ matrix.os }}-dood-node
           context: ./node
+          dockerfile: ${{ matrix.os == 'alpine' && 'Dockerfile.alpine' || 'Dockerfile' }}
           base_image: ${{ matrix.os }}-dood
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -169,13 +172,14 @@ jobs:
       packages: write
     strategy:
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-layer
         with:
           image: ${{ matrix.os }}-dind-node
           context: ./node
+          dockerfile: ${{ matrix.os == 'alpine' && 'Dockerfile.alpine' || 'Dockerfile' }}
           base_image: ${{ matrix.os }}-dind
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -189,7 +193,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-layer
@@ -208,7 +212,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-layer
@@ -228,13 +232,14 @@ jobs:
       packages: write
     strategy:
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-layer
         with:
           image: ${{ matrix.os }}-dood-playwright
           context: ./playwright
+          dockerfile: ${{ matrix.os == 'alpine' && 'Dockerfile.alpine' || 'Dockerfile' }}
           base_image: ${{ matrix.os }}-dood-pnpm
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -247,13 +252,14 @@ jobs:
       packages: write
     strategy:
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
     steps:
       - uses: actions/checkout@v4
       - uses: ./.github/actions/build-layer
         with:
           image: ${{ matrix.os }}-dind-playwright
           context: ./playwright
+          dockerfile: ${{ matrix.os == 'alpine' && 'Dockerfile.alpine' || 'Dockerfile' }}
           base_image: ${{ matrix.os }}-dind-pnpm
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
@@ -275,7 +281,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
     container:
       image: ghcr.io/jclaveau/${{ matrix.os }}-gha-tools:${{ needs.github-context.outputs.build_tag }}
       credentials:
@@ -284,15 +290,25 @@ jobs:
     steps:
       # NB: GitHub runs container-job steps as root (uid 0), ignoring the image's USER, and injects
       # its own RUNNER_TOOL_CACHE/ImageOS — so we only print those, and assert the image-controlled
-      # facts (the OS version and the curated tools).
+      # facts (the OS identity and the curated tools).
       - name: Image identity (diagnostics)
         run: |
           echo "user=$(id -u):$(id -g) ($(whoami))  ImageOS=$ImageOS  RUNNER_TOOL_CACHE=$RUNNER_TOOL_CACHE"
           . /etc/os-release && echo "os=$PRETTY_NAME"
-      - name: It is Ubuntu 24.04
-        run: . /etc/os-release && test "$VERSION_ID" = "24.04"
+      - name: It is the expected OS
+        run: . /etc/os-release && test "$ID" = "${{ matrix.os }}"
       - name: Curated OS tools are present
         run: for t in git jq g++ make zip unzip rsync shellcheck python3 sudo; do command -v "$t" >/dev/null || { echo "missing $t"; exit 1; }; done
+      # The dev env must be identical across ubuntu/alpine: assert each alias resolves to the *exact*
+      # same definition (not just that it exists) as the `runner` user (steps run as root, so su to
+      # runner via a login+interactive shell — the real `docker run` / `act` experience). `grep -qx`
+      # tolerates MOTD/profile noise on the login shell. Any divergence fails the matching OS cell.
+      - name: Dev-env bash sugar is identical across OSes (exact alias definitions)
+        run: |
+          check() { sudo -H -u runner bash -lic "alias $1" | grep -qx "alias $1='$2'" || { echo "alias $1 mismatch (want: $2)"; exit 1; }; }
+          check ll 'ls -alF'
+          check la 'ls -A'
+          check l  'ls -CF'
 
   test-dood-dind-usage:
     runs-on: ubuntu-latest
@@ -306,7 +322,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
         mode: [dood, dind]
     container:
       image: ghcr.io/jclaveau/${{ matrix.os }}-${{ matrix.mode }}:${{ needs.github-context.outputs.build_tag }}
@@ -353,7 +369,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
         mode: [dood, dind]
     container:
       image: ghcr.io/jclaveau/${{ matrix.os }}-${{ matrix.mode }}:${{ needs.github-context.outputs.build_tag }}
@@ -413,7 +429,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
         mode: [dood, dind]
     container:
       image: ghcr.io/jclaveau/${{ matrix.os }}-${{ matrix.mode }}-node:${{ needs.github-context.outputs.build_tag }}
@@ -457,7 +473,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
         mode: [dood, dind]
     container:
       image: ghcr.io/jclaveau/${{ matrix.os }}-${{ matrix.mode }}-pnpm:${{ needs.github-context.outputs.build_tag }}
@@ -479,7 +495,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
         mode: [dood, dind]
     container:
       image: ghcr.io/jclaveau/${{ matrix.os }}-${{ matrix.mode }}-playwright:${{ needs.github-context.outputs.build_tag }}
@@ -520,7 +536,7 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
         mode: [dood, dind]
     steps:
       - uses: actions/checkout@v4
@@ -561,6 +577,10 @@ jobs:
       node: ${{ steps.v.outputs.node }}
       pnpm: ${{ steps.v.outputs.pnpm }}
       pw: ${{ steps.v.outputs.pw }}
+      alpine_os: ${{ steps.va.outputs.alpine_os }}
+      alpine_node: ${{ steps.va.outputs.alpine_node }}
+      alpine_pnpm: ${{ steps.va.outputs.alpine_pnpm }}
+      alpine_pw: ${{ steps.va.outputs.alpine_pw }}
     steps:
       - uses: docker/login-action@v3
         with:
@@ -581,6 +601,18 @@ jobs:
             echo "pnpm=pnpm$(pnpm -v | cut -d. -f1,2)"
             echo "pw=pw$(playwright --version | grep -oE "[0-9]+\.[0-9]+" | head -1)"
           ' >> "$GITHUB_OUTPUT"
+      # Alpine minors, read from alpine-dood-playwright (transitively OS + node + pnpm + playwright).
+      - id: va
+        env:
+          IMG: ghcr.io/jclaveau/alpine-dood-playwright:${{ needs.github-context.outputs.build_tag }}
+        run: |
+          docker run --rm "$IMG" bash -c '
+            . /etc/os-release
+            echo "alpine_os=alpine$(echo "$VERSION_ID" | cut -d. -f1,2)"
+            echo "alpine_node=node$(node -v | sed "s/^v//" | cut -d. -f1,2)"
+            echo "alpine_pnpm=pnpm$(pnpm -v | cut -d. -f1,2)"
+            echo "alpine_pw=pw$(playwright --version | grep -oE "[0-9]+\.[0-9]+" | head -1)"
+          ' >> "$GITHUB_OUTPUT"
 
 
   # ----------------------------------------------------------------------------
@@ -598,7 +630,7 @@ jobs:
       packages: write
     strategy:
       matrix:
-        os: [ubuntu]
+        os: [ubuntu, alpine]
         image: [gha-tools, dood, dind, dood-node, dind-node, dood-pnpm, dind-pnpm, dood-playwright, dind-playwright]
     steps:
       - uses: docker/setup-buildx-action@v3
@@ -617,10 +649,10 @@ jobs:
       # Compose the version-pinned tag for this image from the minors read by `versions`.
       - id: pin
         env:
-          OS: ${{ needs.versions.outputs.os }}
-          NODE: ${{ needs.versions.outputs.node }}
-          PNPM: ${{ needs.versions.outputs.pnpm }}
-          PW: ${{ needs.versions.outputs.pw }}
+          OS: ${{ matrix.os == 'alpine' && needs.versions.outputs.alpine_os || needs.versions.outputs.os }}
+          NODE: ${{ matrix.os == 'alpine' && needs.versions.outputs.alpine_node || needs.versions.outputs.node }}
+          PNPM: ${{ matrix.os == 'alpine' && needs.versions.outputs.alpine_pnpm || needs.versions.outputs.pnpm }}
+          PW: ${{ matrix.os == 'alpine' && needs.versions.outputs.alpine_pw || needs.versions.outputs.pw }}
         run: |
           case "${{ matrix.image }}" in
             gha-tools|dood|dind)             TAG="${OS}";;
