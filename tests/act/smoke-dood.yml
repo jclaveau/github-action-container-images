@@ -1,0 +1,15 @@
+# Smoke workflow run through `act` to mirror REAL GitHub Actions usage of these images: a normal
+# `runs-on: ubuntu-latest` job that uses our image as the job `container:` (NOT as the runner). The
+# image is injected by the test-base-act job via `act --var RUNNER_IMAGE=...`.
+# Kept out of .github/workflows so real CI ignores it.
+name: act smoke (dood)
+on: [push]
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    container:
+      image: ${{ vars.RUNNER_IMAGE }}
+      options: --privileged
+    steps:
+      - run: docker info
+      - run: docker run --rm hello-world

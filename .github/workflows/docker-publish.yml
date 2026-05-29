@@ -545,6 +545,44 @@ jobs:
 
 
   # ----------------------------------------------------------------------------
+  # act: run a tiny workflow through nektos/act using each base image AS the
+  # `ubuntu-latest` runner — exercises the documented "use these as act runners"
+  # path. Runs on a plain runner (not a container job) so act can drive Docker.
+  # ----------------------------------------------------------------------------
+
+  test-base-act:
+    runs-on: ubuntu-latest
+    needs: [github-context, build-base-dood, build-base-dind]
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu]
+        mode: [dood, dind]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - name: Install act
+        run: curl -sSL https://raw.githubusercontent.com/nektos/act/master/install.sh | sudo bash -s -- -b /usr/local/bin
+      - name: Pre-pull the container image
+        run: docker pull "${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-${{ matrix.mode }}:${{ needs.github-context.outputs.build_tag }}"
+      - name: Run the smoke workflow through act
+        env:
+          IMG: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-${{ matrix.mode }}:${{ needs.github-context.outputs.build_tag }}
+        run: |
+          # Faithful to GHA: our image is the job `container:` (image + options live IN the smoke
+          # workflow, injected via --var), NOT a runner override. `-self-hosted` runs on the real
+          # ubuntu-latest host (no runner image pulled, no interactive image prompt), so the job
+          # container runs exactly as on GHA.
+          act push -W tests/act/smoke-${{ matrix.mode }}.yml \
+            -P ubuntu-latest=-self-hosted \
+            --var RUNNER_IMAGE="$IMG"
+
+
+  # ----------------------------------------------------------------------------
   # Versions: read the actual installed minors once from the top dood image (it
   # transitively contains OS + node + pnpm + playwright). `promote` turns these
   # into the version-pinned consumer tags. node is read from the image because its
@@ -589,7 +627,7 @@ jobs:
 
   promote:
     runs-on: ubuntu-latest
-    needs: [github-context, versions, test-base-usage, test-base-effects, test-node-usage, test-pnpm-usage, test-playwright-usage]
+    needs: [github-context, versions, test-base-usage, test-base-effects, test-base-act, test-node-usage, test-pnpm-usage, test-playwright-usage]
     permissions:
       contents: read
       packages: write
