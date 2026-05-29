@@ -1,6 +1,6 @@
 # WIP: Github Actions Container Images
 
-[![Build and Push Docker Images](https://github.com/jclaveau/github-action-container-images/actions/workflows/docker-publish.yml/badge.svg)](https://github.com/jclaveau/github-action-container-images/actions/workflows/docker-publish.yml)
+[![Test and Publish](https://github.com/jclaveau/github-action-container-images/actions/workflows/test-and-publish.yml/badge.svg)](https://github.com/jclaveau/github-action-container-images/actions/workflows/test-and-publish.yml)
 
 ## Goals
 - [ ] Prepare images with installed dependencies to speedup CI
