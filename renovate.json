@@ -58,7 +58,7 @@
     },
     {
       "customType": "regex",
-      "fileMatch": ["^pnpm/Dockerfile$"],
+      "fileMatch": ["^node/Dockerfile$"],
       "matchStrings": [
         "ARG NODE_VERSION=(?<currentValue>.*?)\\n"
       ],

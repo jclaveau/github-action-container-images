@@ -26,8 +26,11 @@ Images are named `<os>-<mode>[-<layer>]` (`os` ∈ {`ubuntu`}, `mode` ∈ {`dood
 | Image | Contents |
 | --- | --- |
 | `ubuntu-dood`, `ubuntu-dind` | [Ubuntu 24.04](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md) + [DinD](https://www.docker.com/resources/docker-in-docker-containerized-ci-workflows-dockercon-2023/) tooling |
-| `ubuntu-dood-pnpm`, `ubuntu-dind-pnpm` | + Node, pnpm and node-gyp build tools (python3, make, g++) |
+| `ubuntu-dood-node`, `ubuntu-dind-node` | + Node, npm and node-gyp build tools (python3, make, g++) |
+| `ubuntu-dood-pnpm`, `ubuntu-dind-pnpm` | + pnpm |
 | `ubuntu-dood-playwright`, `ubuntu-dind-playwright` | + Playwright |
+
+Besides `latest`, each push to `main` also publishes a **version-pinned** tag (OS + the minor of each tool it carries), e.g. `ubuntu-dood-node:ubuntu24.04-node22.12`, `ubuntu-dood-pnpm:ubuntu24.04-node22.12-pnpm9.15`, `ubuntu-dood-playwright:ubuntu24.04-node22.12-pnpm9.15-pw1.50`.
 
 #### `-dood` vs `-dind`
 

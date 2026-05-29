@@ -124,9 +124,80 @@ jobs:
           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind:buildcache,mode=max
 
 
-  build-pnpm-dood:
+  build-node-dood:
     runs-on: ubuntu-latest
     needs: [github-context, build-base-dood]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        os: [ubuntu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-flags: --debug
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-node
+          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
+          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./node
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood:${{ needs.github-context.outputs.build_tag }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-node:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-node:buildcache,mode=max
+
+  build-node-dind:
+    runs-on: ubuntu-latest
+    needs: [github-context, build-node-dood]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        os: [ubuntu]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: docker/setup-buildx-action@v3
+        with:
+          buildkitd-flags: --debug
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - id: meta
+        uses: docker/metadata-action@v5
+        with:
+          images: ${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-node
+          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
+          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
+      - uses: docker/build-push-action@v5
+        with:
+          context: ./dind
+          push: true
+          tags: ${{ steps.meta.outputs.tags }}
+          labels: ${{ steps.meta.outputs.labels }}
+          build-args: |
+            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-node:${{ needs.github-context.outputs.build_tag }}
+          cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-node:buildcache
+          cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dind-node:buildcache,mode=max
+
+
+  build-pnpm-dood:
+    runs-on: ubuntu-latest
+    needs: [github-context, build-node-dood]
     permissions:
       contents: read
       packages: write
@@ -155,7 +226,7 @@ jobs:
           tags: ${{ steps.meta.outputs.tags }}
           labels: ${{ steps.meta.outputs.labels }}
           build-args: |
-            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood:${{ needs.github-context.outputs.build_tag }}
+            BASE_IMAGE=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-node:${{ needs.github-context.outputs.build_tag }}
           cache-from: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-pnpm:buildcache
           cache-to: type=registry,ref=${{ secrets.DOCKERHUB_USERNAME }}/${{ matrix.os }}-dood-pnpm:buildcache,mode=max
 
@@ -381,9 +452,9 @@ jobs:
           fi
 
 
-  test-pnpm-usage:
+  test-node-usage:
     runs-on: ubuntu-latest
-    needs: [github-context, build-pnpm-dood, build-pnpm-dind]
+    needs: [github-context, build-node-dood, build-node-dind]
     timeout-minutes: 5
     strategy:
       fail-fast: false
@@ -391,14 +462,13 @@ jobs:
         os: [ubuntu]
         mode: [dood, dind]
     container:
-      image: jclaveau/${{ matrix.os }}-${{ matrix.mode }}-pnpm:${{ needs.github-context.outputs.build_tag }}
+      image: jclaveau/${{ matrix.os }}-${{ matrix.mode }}-node:${{ needs.github-context.outputs.build_tag }}
       options: >-
         --privileged
         --env "HOME=/home/runner"
     steps:
       - run: node --version
       - run: npm --version
-      - run: pnpm --version
       - run: python3 --version
       - run: make --version
       - run: g++ --version
@@ -421,6 +491,25 @@ jobs:
           printf '{ "targets": [ { "target_name": "hello", "sources": [ "hello.cc" ] } ] }' > binding.gyp
           npx -y node-gyp rebuild
           node -e "console.log(require('./build/Release/hello.node').hello())"
+
+
+  test-pnpm-usage:
+    runs-on: ubuntu-latest
+    needs: [github-context, build-pnpm-dood, build-pnpm-dind]
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu]
+        mode: [dood, dind]
+    container:
+      image: jclaveau/${{ matrix.os }}-${{ matrix.mode }}-pnpm:${{ needs.github-context.outputs.build_tag }}
+      options: >-
+        --privileged
+        --env "HOME=/home/runner"
+    steps:
+      - run: node --version   # inherited from the node layer
+      - run: pnpm --version
 
 
   test-playwright-usage:
@@ -456,6 +545,42 @@ jobs:
 
 
   # ----------------------------------------------------------------------------
+  # Versions: read the actual installed minors once from the top dood image (it
+  # transitively contains OS + node + pnpm + playwright). `promote` turns these
+  # into the version-pinned consumer tags. node is read from the image because its
+  # ARG isn't authoritative (NodeSource installs the latest within the major).
+  # ----------------------------------------------------------------------------
+
+  versions:
+    runs-on: ubuntu-latest
+    needs: [github-context, build-playwright-dood]
+    outputs:
+      os: ${{ steps.v.outputs.os }}
+      node: ${{ steps.v.outputs.node }}
+      pnpm: ${{ steps.v.outputs.pnpm }}
+      pw: ${{ steps.v.outputs.pw }}
+    steps:
+      - uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+      - id: v
+        env:
+          IMG: ${{ secrets.DOCKERHUB_USERNAME }}/ubuntu-dood-playwright:${{ needs.github-context.outputs.build_tag }}
+        run: |
+          # `docker run` pull progress goes to stderr, so $GITHUB_OUTPUT (stdout) stays clean.
+          # Prefixes are baked in so `promote` composes the pinned tag by concatenation.
+          # node/pnpm/playwright resolve via the image's ENV PATH (+= $PNPM_HOME); node is in /usr/bin.
+          docker run --rm "$IMG" bash -c '
+            . /etc/os-release
+            echo "os=ubuntu${VERSION_ID}"
+            echo "node=node$(node -v | sed "s/^v//" | cut -d. -f1,2)"
+            echo "pnpm=pnpm$(pnpm -v | cut -d. -f1,2)"
+            echo "pw=pw$(playwright --version | grep -oE "[0-9]+\.[0-9]+" | head -1)"
+          ' >> "$GITHUB_OUTPUT"
+
+
+  # ----------------------------------------------------------------------------
   # Promote: the all-or-nothing publish gate. `needs` every test job, so a single
   # failure skips this job entirely and nothing consumer-facing is published. On
   # success it adds the consumer tags (latest / pr-<n>) to the exact digests that
@@ -464,20 +589,35 @@ jobs:
 
   promote:
     runs-on: ubuntu-latest
-    needs: [github-context, test-base-usage, test-base-effects, test-pnpm-usage, test-playwright-usage]
+    needs: [github-context, versions, test-base-usage, test-base-effects, test-node-usage, test-pnpm-usage, test-playwright-usage]
     permissions:
       contents: read
       packages: write
     strategy:
       matrix:
         os: [ubuntu]
-        image: [dood, dind, dood-pnpm, dind-pnpm, dood-playwright, dind-playwright]
+        image: [dood, dind, dood-node, dind-node, dood-pnpm, dind-pnpm, dood-playwright, dind-playwright]
     steps:
       - uses: docker/setup-buildx-action@v3
       - uses: docker/login-action@v3
         with:
           username: ${{ secrets.DOCKERHUB_USERNAME }}
           password: ${{ secrets.DOCKERHUB_TOKEN }}
+      # Compose the version-pinned tag for this image from the minors read by `versions`.
+      - id: pin
+        env:
+          OS: ${{ needs.versions.outputs.os }}
+          NODE: ${{ needs.versions.outputs.node }}
+          PNPM: ${{ needs.versions.outputs.pnpm }}
+          PW: ${{ needs.versions.outputs.pw }}
+        run: |
+          case "${{ matrix.image }}" in
+            dood|dind)                       TAG="${OS}";;
+            dood-node|dind-node)             TAG="${OS}-${NODE}";;
+            dood-pnpm|dind-pnpm)             TAG="${OS}-${NODE}-${PNPM}";;
+            dood-playwright|dind-playwright) TAG="${OS}-${NODE}-${PNPM}-${PW}";;
+          esac
+          echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
       - id: meta
         uses: docker/metadata-action@v5
         with:
@@ -485,6 +625,7 @@ jobs:
           tags: |
             type=ref,event=pr
             type=raw,value=latest,enable=${{ github.event_name != 'pull_request' }}
+            type=raw,value=${{ steps.pin.outputs.tag }},enable=${{ github.event_name != 'pull_request' }}
             type=sha,prefix={{branch}}-
             type=ref,event=branch
             type=semver,pattern={{version}}
