@@ -52,6 +52,92 @@ jobs:
 
 
   # ----------------------------------------------------------------------------
+  # Change detection: a layer is (re)built iff its own context dir OR any ancestor changed, or the shared
+  # build infra changed. Emits a JSON map {<image>: true|false}; each build-* job passes the whole map to
+  # build-layer, which retags the previous `edge` image instead of rebuilding when its entry is false.
+  # ----------------------------------------------------------------------------
+  changes:
+    runs-on: ubuntu-latest
+    outputs:
+      map: ${{ steps.compute.outputs.map }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0   # need history to diff before..after
+      - id: compute
+        env:
+          EVENT: ${{ github.event_name }}
+          BEFORE: ${{ github.event.before }}
+          SHA: ${{ github.sha }}
+          BASE_REF: ${{ github.base_ref }}
+        run: |
+          set -euo pipefail
+          ALL=0
+          : > /tmp/changed.txt
+          case "$EVENT" in
+            workflow_dispatch) ALL=1 ;;
+            pull_request)
+              git fetch --no-tags origin "$BASE_REF"
+              git diff --name-only "origin/${BASE_REF}...HEAD" > /tmp/changed.txt ;;
+            push)
+              if [ -z "${BEFORE:-}" ] || [ "$BEFORE" = "0000000000000000000000000000000000000000" ]; then
+                ALL=1
+              else
+                git diff --name-only "$BEFORE" "$SHA" > /tmp/changed.txt 2>/dev/null || ALL=1
+              fi ;;
+            *) ALL=1 ;;
+          esac
+          python3 - "$ALL" <<'PY'
+          import json, os, sys
+          all_changed = sys.argv[1] == "1"
+          files = [] if all_changed else [l.strip() for l in open("/tmp/changed.txt") if l.strip()]
+          # shared build infra -> rebuild everything (safe)
+          if any(f == ".github/workflows/test-and-publish.yml"
+                 or f.startswith(".github/actions/build-layer/") for f in files):
+              all_changed = True
+
+          def dir_changed(d):
+              return any(f == d or f.startswith(d + "/") for f in files)
+
+          # suffix -> (context dir, base suffix). "__GHA__" = the os-specific gha-tools dir (chain root).
+          GRAPH = {
+              "gha-tools": ("__GHA__", None),
+              "docker": ("docker", "gha-tools"),
+              "dood": ("dood", "docker"),
+              "dind": ("dind", "docker"),
+              "dood-node": ("node", "dood"),
+              "dind-node": ("node", "dind"),
+              "dood-pnpm": ("pnpm", "dood-node"),
+              "dind-pnpm": ("pnpm", "dind-node"),
+              "dood-pnpm-gyp": ("pnpm-gyp", "dood-node"),
+              "dind-pnpm-gyp": ("pnpm-gyp", "dind-node"),
+              "dood-playwright": ("playwright", "dood-pnpm"),
+              "dind-playwright": ("playwright", "dind-pnpm"),
+              "dood-playwright-gyp": ("playwright", "dood-pnpm-gyp"),
+              "dind-playwright-gyp": ("playwright", "dind-pnpm-gyp"),
+          }
+          cache = {}
+          def changed(osname, suffix):
+              k = (osname, suffix)
+              if k in cache:
+                  return cache[k]
+              d, base = GRAPH[suffix]
+              dd = f"{osname}-gha-tools" if d == "__GHA__" else d
+              r = dir_changed(dd) or (changed(osname, base) if base else False)
+              cache[k] = r
+              return r
+
+          m = {}
+          for osname in ("ubuntu", "alpine"):
+              for suffix in GRAPH:
+                  m[f"{osname}-{suffix}"] = True if all_changed else changed(osname, suffix)
+          with open(os.environ["GITHUB_OUTPUT"], "a") as fh:
+              fh.write("map=" + json.dumps(m) + "\n")
+          print(json.dumps(m, indent=2))
+          PY
+
+
+  # ----------------------------------------------------------------------------
   # Builds: a shared, unpublished `docker` base (ubuntu-gha-tools + docker/compose), then TWO
   # symmetric, independent chains built in parallel — each layer's dood and dind build side by side:
   #   dood: docker -> dood -> dood-node -> dood-pnpm -> dood-playwright
@@ -65,7 +151,7 @@ jobs:
 
   build-gha-tools:
     runs-on: ubuntu-latest
-    needs: github-context
+    needs: [github-context, changes]
     permissions:
       contents: read
       packages: write
@@ -80,12 +166,13 @@ jobs:
           context: ./${{ matrix.os }}-gha-tools
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          changed_map: ${{ needs.changes.outputs.map }}
 
   # Unpublished shared base: ubuntu-gha-tools + docker/compose. Only ever pushed under the
   # throwaway build tag (never promoted); dood and dind are built from it in parallel.
   build-docker:
     runs-on: ubuntu-latest
-    needs: [github-context, build-gha-tools]
+    needs: [github-context, changes, build-gha-tools]
     permissions:
       contents: read
       packages: write
@@ -103,10 +190,11 @@ jobs:
           docker_group_id: ${{ needs.github-context.outputs.docker_group_id }}
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          changed_map: ${{ needs.changes.outputs.map }}
 
   build-dood:
     runs-on: ubuntu-latest
-    needs: [github-context, build-docker]
+    needs: [github-context, changes, build-docker]
     permissions:
       contents: read
       packages: write
@@ -122,10 +210,11 @@ jobs:
           base_image: ${{ matrix.os }}-docker
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          changed_map: ${{ needs.changes.outputs.map }}
 
   build-dind:
     runs-on: ubuntu-latest
-    needs: [github-context, build-docker]
+    needs: [github-context, changes, build-docker]
     permissions:
       contents: read
       packages: write
@@ -142,11 +231,12 @@ jobs:
           base_image: ${{ matrix.os }}-docker
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          changed_map: ${{ needs.changes.outputs.map }}
 
 
   build-node-dood:
     runs-on: ubuntu-latest
-    needs: [github-context, build-dood]
+    needs: [github-context, changes, build-dood]
     permissions:
       contents: read
       packages: write
@@ -163,10 +253,11 @@ jobs:
           base_image: ${{ matrix.os }}-dood
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          changed_map: ${{ needs.changes.outputs.map }}
 
   build-node-dind:
     runs-on: ubuntu-latest
-    needs: [github-context, build-dind]
+    needs: [github-context, changes, build-dind]
     permissions:
       contents: read
       packages: write
@@ -183,11 +274,12 @@ jobs:
           base_image: ${{ matrix.os }}-dind
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          changed_map: ${{ needs.changes.outputs.map }}
 
 
   build-pnpm-dood:
     runs-on: ubuntu-latest
-    needs: [github-context, build-node-dood]
+    needs: [github-context, changes, build-node-dood]
     permissions:
       contents: read
       packages: write
@@ -203,10 +295,11 @@ jobs:
           base_image: ${{ matrix.os }}-dood-node
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          changed_map: ${{ needs.changes.outputs.map }}
 
   build-pnpm-dind:
     runs-on: ubuntu-latest
-    needs: [github-context, build-node-dind]
+    needs: [github-context, changes, build-node-dind]
     permissions:
       contents: read
       packages: write
@@ -222,13 +315,14 @@ jobs:
           base_image: ${{ matrix.os }}-dind-node
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          changed_map: ${{ needs.changes.outputs.map }}
 
 
   # node-gyp variant: pnpm + the C/C++ toolchain the base gha-tools drops. Built from ./pnpm-gyp as a
   # SIBLING of build-pnpm-* (both FROM the node layer) so the slim and -gyp chains build in parallel.
   build-pnpm-gyp-dood:
     runs-on: ubuntu-latest
-    needs: [github-context, build-node-dood]
+    needs: [github-context, changes, build-node-dood]
     permissions:
       contents: read
       packages: write
@@ -245,10 +339,11 @@ jobs:
           base_image: ${{ matrix.os }}-dood-node
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          changed_map: ${{ needs.changes.outputs.map }}
 
   build-pnpm-gyp-dind:
     runs-on: ubuntu-latest
-    needs: [github-context, build-node-dind]
+    needs: [github-context, changes, build-node-dind]
     permissions:
       contents: read
       packages: write
@@ -265,11 +360,12 @@ jobs:
           base_image: ${{ matrix.os }}-dind-node
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          changed_map: ${{ needs.changes.outputs.map }}
 
 
   build-playwright-dood:
     runs-on: ubuntu-latest
-    needs: [github-context, build-pnpm-dood]
+    needs: [github-context, changes, build-pnpm-dood]
     permissions:
       contents: read
       packages: write
@@ -286,10 +382,11 @@ jobs:
           base_image: ${{ matrix.os }}-dood-pnpm
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          changed_map: ${{ needs.changes.outputs.map }}
 
   build-playwright-dind:
     runs-on: ubuntu-latest
-    needs: [github-context, build-pnpm-dind]
+    needs: [github-context, changes, build-pnpm-dind]
     permissions:
       contents: read
       packages: write
@@ -306,13 +403,14 @@ jobs:
           base_image: ${{ matrix.os }}-dind-pnpm
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          changed_map: ${{ needs.changes.outputs.map }}
 
 
   # Playwright on the node-gyp base: the SAME ./playwright layer, only the base differs (pnpm-gyp), for
   # consumers needing Playwright + native builds and for the slim-vs-gyp benchmark comparison.
   build-playwright-gyp-dood:
     runs-on: ubuntu-latest
-    needs: [github-context, build-pnpm-gyp-dood]
+    needs: [github-context, changes, build-pnpm-gyp-dood]
     permissions:
       contents: read
       packages: write
@@ -329,10 +427,11 @@ jobs:
           base_image: ${{ matrix.os }}-dood-pnpm-gyp
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          changed_map: ${{ needs.changes.outputs.map }}
 
   build-playwright-gyp-dind:
     runs-on: ubuntu-latest
-    needs: [github-context, build-pnpm-gyp-dind]
+    needs: [github-context, changes, build-pnpm-gyp-dind]
     permissions:
       contents: read
       packages: write
@@ -349,6 +448,7 @@ jobs:
           base_image: ${{ matrix.os }}-dind-pnpm-gyp
           build_tag: ${{ needs.github-context.outputs.build_tag }}
           github_token: ${{ secrets.GITHUB_TOKEN }}
+          changed_map: ${{ needs.changes.outputs.map }}
 
 
   # ----------------------------------------------------------------------------

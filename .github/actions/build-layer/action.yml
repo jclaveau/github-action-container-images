@@ -29,6 +29,14 @@ inputs:
   github_token:
     description: Token for the GHCR push (composite actions can't read secrets; pass secrets.GITHUB_TOKEN)
     required: true
+  changed_map:
+    description: >-
+      JSON map {image: true|false} from the `changes` job, keyed by the full image name (== `image`).
+      When this layer's entry is true (or the map is empty / lacks the key) it is built and pushed
+      (sha + edge); otherwise the build is skipped and the layer's `edge` image is retagged to build_tag,
+      so downstream builds / tests / promote still resolve the sha.
+    required: false
+    default: ""
 
 runs:
   using: composite
@@ -45,9 +53,25 @@ runs:
       uses: docker/metadata-action@v5
       with:
         images: ghcr.io/jclaveau/${{ inputs.image }}
-        # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
-        tags: type=raw,value=${{ inputs.build_tag }}
-    - uses: docker/build-push-action@v5
+        # Run-scoped tag (the chain + tests reference it) + moving `edge` (retag source for unchanged
+        # layers on later runs). Consumer tags (latest / pinned) are added by `promote`.
+        tags: |
+          type=raw,value=${{ inputs.build_tag }}
+          type=raw,value=edge
+    # Resolve this layer's changed flag from the map (keyed by image). Empty map / missing key => build.
+    - id: gate
+      shell: bash
+      run: |
+        if [ -z '${{ inputs.changed_map }}' ]; then
+          changed=true
+        else
+          changed=$(jq -r --arg k "${{ inputs.image }}" '.[$k] // true' <<<'${{ inputs.changed_map }}')
+        fi
+        echo "changed=$changed" >> "$GITHUB_OUTPUT"
+        echo "layer ${{ inputs.image }} changed=$changed"
+    # Changed layer: build + push (sha + edge).
+    - if: ${{ steps.gate.outputs.changed == 'true' }}
+      uses: docker/build-push-action@v5
       with:
         context: ${{ inputs.context }}
         file: ${{ inputs.context }}/${{ inputs.dockerfile }}
@@ -60,3 +84,12 @@ runs:
           ${{ inputs.docker_group_id && format('DOCKER_GROUP_ID={0}', inputs.docker_group_id) || '' }}
         cache-from: type=registry,ref=ghcr.io/jclaveau/${{ inputs.image }}:buildcache
         cache-to: type=registry,ref=ghcr.io/jclaveau/${{ inputs.image }}:buildcache,mode=max
+    # Unchanged layer: skip the build, just point this run's sha at the existing `edge` image
+    # (server-side manifest copy — no build, no pull). Keeps the sha-chain intact for downstream/tests.
+    - if: ${{ steps.gate.outputs.changed != 'true' }}
+      shell: bash
+      run: |
+        echo "Layer unchanged — retagging edge -> ${{ inputs.build_tag }} (no rebuild)"
+        docker buildx imagetools create \
+          -t "ghcr.io/jclaveau/${{ inputs.image }}:${{ inputs.build_tag }}" \
+          "ghcr.io/jclaveau/${{ inputs.image }}:edge"
