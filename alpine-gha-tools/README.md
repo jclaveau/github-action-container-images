@@ -8,12 +8,19 @@ musl/Alpine allows — the lightweight foundation for the `alpine-*` flavor of e
   passwordless `sudo` (via the `shadow` + `sudo` packages, so the user setup is identical to Ubuntu's).
 - **Environment**: `LANG=C.UTF-8`, `CI=true`, `ImageOS=alpine3.21`,
   `RUNNER_TOOL_CACHE=/opt/hostedtoolcache` (+ `AGENT_TOOLSDIRECTORY`), and the `/opt/hostedtoolcache` dir.
-- **OS-level tools** — the Alpine (`apk`) equivalents of the ubuntu-gha-tools curated set: build-base,
+- **OS-level tools** — the Alpine (`apk`) equivalents of the ubuntu-gha-tools curated set:
   pkgconf, git, curl, wget, gnupg, jq, zip/unzip, xz/bzip2/zstd/lz4, p7zip, rsync, openssh-client,
-  bind-tools, shellcheck, python3, … (see the `Dockerfile` for the full list).
+  bind-tools, python3, … (see the `Dockerfile` for the full list).
 - **Bash sugar** — `bash` + `coreutils` + the same interactive aliases as Ubuntu's default shell
   (`ll`/`la`/`l`, colored `ls`/`grep`), installed via `/etc/skel` so `runner` gets them on `docker run`
   / `act`. CI asserts these are identical to ubuntu-gha-tools.
+
+## What's deliberately omitted (and why)
+Mirrors [`ubuntu-gha-tools`](../ubuntu-gha-tools/README.md): the **C/C++ toolchain** (`build-base`) and
+**`shellcheck`** are dropped to keep this shared base slim — they'd otherwise weigh down every
+downstream image. Native-addon builds use the **`-gyp` variant**
+([`{os}-{mode}-pnpm-gyp`](../pnpm-gyp/README.md), which adds `build-base`); `apk add shellcheck` in
+your job if you lint shell.
 
 ## What it implies
 - **No Docker and no language runtimes** — those are added by the [`docker`](../docker/README.md) overlay

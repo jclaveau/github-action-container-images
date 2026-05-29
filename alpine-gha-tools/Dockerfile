@@ -19,6 +19,9 @@ ENV LANG=C.UTF-8 \
 # `coreutils` gives GNU ls/etc. so the `ll` family behaves like Ubuntu's (not the busybox applets).
 # apt-only packages (apt-utils, lsb-release, software-properties-common, locales) and `time` are
 # dropped (N/A on Alpine/musl); python-is-python3 becomes a python->python3 symlink.
+# Deliberately NOT installed (mirrors ubuntu-gha-tools — see README): the C/C++ toolchain (build-base,
+# ~compressed dead weight; use the `-gyp` variant for native addons) and shellcheck (dev-only linter,
+# `apk add shellcheck` it if you lint shell).
 RUN echo "OS-level tools: Alpine equivalents of the ubuntu-gha-tools curated set (no runtimes/SDKs)" \
     && apk add --no-cache \
        bash \
@@ -26,7 +29,6 @@ RUN echo "OS-level tools: Alpine equivalents of the ubuntu-gha-tools curated set
        coreutils \
        shadow \
        sudo \
-       build-base \
        pkgconf \
        git \
        curl \
@@ -51,7 +53,6 @@ RUN echo "OS-level tools: Alpine equivalents of the ubuntu-gha-tools curated set
        netcat-openbsd \
        parallel \
        brotli \
-       shellcheck \
        python3 \
     && ln -sf python3 /usr/bin/python \
     \

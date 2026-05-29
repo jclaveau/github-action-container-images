@@ -2,9 +2,9 @@
 ARG BASE_IMAGE=jclaveau/alpine-dood:latest
 FROM ${BASE_IMAGE}
 
-# Alpine's nodejs/npm (NodeSource is Debian-only). The node-gyp toolchain (python3, make, g++) already
-# comes from build-base + python3 in alpine-gha-tools, so nothing else is needed here.
-LABEL org.opencontainers.image.description="Node + npm + node-gyp build tools in Alpine based DinD as Github Actions Container"
+# Alpine's nodejs/npm (NodeSource is Debian-only). Node + npm only — no node-gyp toolchain (alpine-gha-tools
+# no longer ships build-base). Native addon builds use the `-gyp` variant ({os}-{mode}-pnpm-gyp). See README.
+LABEL org.opencontainers.image.description="Node + npm (slim, no compiler) in Alpine based DinD as Github Actions Container"
 
 RUN echo "Install Node.js + npm from Alpine's repos" \
     && sudo apk add --no-cache nodejs npm

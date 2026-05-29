@@ -6,11 +6,12 @@ FROM ${BASE_IMAGE}
 ARG NODE_VERSION=22.12.0
 
 
-LABEL org.opencontainers.image.description="Node + npm + node-gyp build tools (python3, make, g++) in Ubuntu based DinD as Github Actions Container"
+LABEL org.opencontainers.image.description="Node + npm (slim, no compiler) in Ubuntu based DinD as Github Actions Container"
 
 
-RUN echo "Install Node.js (NodeSource) and node-gyp toolchain (python3, make, g++)" \
+# Node + npm only — no node-gyp toolchain here (the base gha-tools no longer ships a compiler). Native
+# addon builds use the `-gyp` variant ({os}-{mode}-pnpm-gyp), which adds build-essential. See README.
+RUN echo "Install Node.js (NodeSource)" \
     && sudo curl -fsSL https://deb.nodesource.com/setup_${NODE_VERSION%%.*}.x | sudo bash - \
     && sudo apt-get install -y nodejs \
-    && sudo apt-get install -y --no-install-recommends python3 make g++ \
     && sudo rm -rf /var/lib/apt/lists/*

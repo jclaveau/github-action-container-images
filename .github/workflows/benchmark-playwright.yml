@@ -1,23 +1,33 @@
 name: Benchmark Playwright
 
-# Quantifies "time until Playwright tests start" across four setups, to show what our prebuilt
-# *-playwright images save vs installing from scratch. Every run benchmarks BOTH browser modes —
+# Quantifies "time until Playwright tests start" to show what our prebuilt *-playwright images save vs
+# installing from scratch — and compares the slim images against their `-gyp` twins (same image + the
+# node-gyp toolchain) to expose the compiler's pull cost. Every run benchmarks BOTH browser modes —
 # chromium-only and the full set (chromium+firefox+webkit) — and each scenario runs 10×, so the summary
 # reports mean ± 95% margin of error (Student's t). The same scenarios are also run through nektos/act
 # (each image used as a local act runner) and shown in a separate "Via act" table.
-# (alpine-* images are Chromium-only — no firefox/webkit on musl — so they only appear in chromium tables.
-#  Our images are compared in both dood and dind flavors.)
-# TODO: narrow the push trigger to fire when Renovate bumps the image versions (e.g. path filter on the
-# Dockerfiles or on the Renovate update merges), so the numbers track the images that actually changed.
+# OUR images are pulled from GHCR by tag (default: sha of the build that triggered this run; overridable
+# via the image_tag dispatch input) so each run benchmarks the exact images that build pushed; official
+# stays MCR. (alpine-* images are Chromium-only — no firefox/webkit on musl — so they only appear in
+# chromium tables. Our images are compared in both dood and dind flavors, slim and -gyp.)
 
 on:
-  push:
+  # Auto-run after a successful build so the commit's freshly-pushed GHCR sha images exist (a push can't
+  # bench itself — the images aren't built yet, and GHCR has no `latest`). Manual dispatch can target any tag.
+  workflow_run:
+    workflows: ["Test and Publish"]
+    types: [completed]
     branches: [main]
   workflow_dispatch:
     inputs:
       pw_version:
         description: Playwright version to benchmark (must match the published image tags)
         default: '1.50.1'
+      image_tag:
+        description: >-
+          GHCR tag for OUR images, e.g. sha-<sha>. Empty = sha of this commit (dispatch) or of the build
+          that triggered the run (workflow_run).
+        default: ''
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -25,37 +35,55 @@ concurrency:
 
 permissions:
   contents: read
+  packages: read   # pull our private GHCR sha images
 
 jobs:
   # Emits the container matrix as JSON so the official image tag can embed the chosen Playwright version
   # (a static matrix.include can't reference inputs). Each scenario runs in both browser modes; alpine is
   # Chromium-only, so it gets a single cell.
   config:
+    # workflow_run fires regardless of the build's result; only bench if it succeeded (images exist).
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.c.outputs.matrix }}
+      tag: ${{ steps.c.outputs.tag }}
     steps:
       - id: c
         run: |
           PW="${{ github.event.inputs.pw_version || '1.50.1' }}"
+          # OUR images are benchmarked from GHCR by tag. Empty input => the sha the triggering build pushed
+          # (workflow_run.head_sha) or this commit's sha (dispatch). official stays on MCR.
+          TAG="${{ github.event.inputs.image_tag }}"
+          if [ -z "$TAG" ]; then
+            if [ "${{ github.event_name }}" = "workflow_run" ]; then
+              TAG="sha-${{ github.event.workflow_run.head_sha }}"
+            else
+              TAG="sha-${{ github.sha }}"
+            fi
+          fi
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           OFFICIAL="mcr.microsoft.com/playwright:v${PW}-noble"
           HOME_OPT="--env HOME=/home/runner"
-          # Each base cell is repeated 10× (run 1..10) so the summary can aggregate (mean ± 95% MoE).
-          MATRIX="$(jq -cn --arg off "$OFFICIAL" --arg h "$HOME_OPT" '
-            [ {scenario:"official",    image:$off, options:"--env HOME=/root", browsers:"chromium"},
-              {scenario:"official",    image:$off, options:"--env HOME=/root", browsers:"all"},
-              {scenario:"ubuntu-dood", image:"jclaveau/ubuntu-dood-playwright:latest", options:$h, browsers:"chromium"},
-              {scenario:"ubuntu-dood", image:"jclaveau/ubuntu-dood-playwright:latest", options:$h, browsers:"all"},
-              {scenario:"ubuntu-dind", image:"jclaveau/ubuntu-dind-playwright:latest", options:$h, browsers:"chromium"},
-              {scenario:"ubuntu-dind", image:"jclaveau/ubuntu-dind-playwright:latest", options:$h, browsers:"all"},
-              {scenario:"alpine-dood", image:"jclaveau/alpine-dood-playwright:latest", options:$h, browsers:"chromium"},
-              {scenario:"alpine-dind", image:"jclaveau/alpine-dind-playwright:latest", options:$h, browsers:"chromium"} ] as $base
+          GHCR="ghcr.io/jclaveau"
+          # Our images come in slim ("") and node-gyp ("-gyp") variants, benched side-by-side. Ubuntu runs
+          # both browser modes; alpine is Chromium-only. Each base cell repeats 10× (run 1..10).
+          MATRIX="$(jq -cn --arg off "$OFFICIAL" --arg h "$HOME_OPT" --arg ghcr "$GHCR" --arg tag "$TAG" '
+            def img($p; $g): $ghcr + "/" + $p + "-playwright" + $g + ":" + $tag;
+            ( [ {scenario:"official", image:$off, options:"--env HOME=/root", browsers:"chromium"},
+                {scenario:"official", image:$off, options:"--env HOME=/root", browsers:"all"} ]
+              + [ ("ubuntu-dood","ubuntu-dind") as $p | ("","-gyp") as $g | ("chromium","all") as $b
+                  | {scenario:($p+$g), image:img($p;$g), options:$h, browsers:$b} ]
+              + [ ("alpine-dood","alpine-dind") as $p | ("","-gyp") as $g
+                  | {scenario:($p+$g), image:img($p;$g), options:$h, browsers:"chromium"} ]
+            ) as $base
             | {include: [ $base[] as $b | range(1;11) as $r | $b + {run:$r} ]}')"
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
   # The thing we're beating: a bare runner installing Playwright + browsers + system deps from scratch.
   baseline:
     name: bench-baseline-${{ matrix.browsers }}-${{ matrix.run }}
+    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
@@ -101,6 +129,11 @@ jobs:
     container:
       image: ${{ matrix.image }}
       options: ${{ matrix.options }}
+      # Our images live on (private) GHCR; the github token authenticates the pull. The official cell is
+      # on MCR — login there succeeds and the pull stays anonymous, so the same credentials are harmless.
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
     steps:
       - uses: actions/checkout@v4
       - name: Ensure pnpm
@@ -128,21 +161,32 @@ jobs:
   # `act` invocation, writing the result to an artifact the summary picks up. Chromium-only, 3 runs each.
   act:
     name: bench-act-${{ matrix.scenario }}-${{ matrix.browsers }}-${{ matrix.run }}
+    needs: config
     runs-on: ubuntu-latest
     timeout-minutes: 30
     strategy:
       fail-fast: false
       matrix:
-        scenario: [baseline, official, ubuntu-dood, ubuntu-dind, alpine-dood, alpine-dind]
+        scenario: [baseline, official, ubuntu-dood, ubuntu-dood-gyp, ubuntu-dind, ubuntu-dind-gyp, alpine-dood, alpine-dood-gyp, alpine-dind, alpine-dind-gyp]
         browsers: [chromium, all]
         run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
         exclude:
-          - scenario: alpine-dood   # Chromium-only on musl
+          - scenario: alpine-dood       # Chromium-only on musl
+            browsers: all
+          - scenario: alpine-dood-gyp
             browsers: all
           - scenario: alpine-dind
             browsers: all
+          - scenario: alpine-dind-gyp
+            browsers: all
     steps:
       - uses: actions/checkout@v4
+      - name: Log in to GHCR (pull our private sha images)
+        uses: docker/login-action@v3
+        with:
+          registry: ghcr.io
+          username: ${{ github.actor }}
+          password: ${{ secrets.GITHUB_TOKEN }}
       - name: Install act
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/nektos/act/master/install.sh \
@@ -152,13 +196,13 @@ jobs:
         id: img
         run: |
           PW="${{ github.event.inputs.pw_version || '1.50.1' }}"
-          case "${{ matrix.scenario }}" in
-            baseline)    IMG="catthehacker/ubuntu:act-22.04" ;;
-            official)    IMG="mcr.microsoft.com/playwright:v${PW}-noble" ;;
-            ubuntu-dood) IMG="jclaveau/ubuntu-dood-playwright:latest" ;;
-            ubuntu-dind) IMG="jclaveau/ubuntu-dind-playwright:latest" ;;
-            alpine-dood) IMG="jclaveau/alpine-dood-playwright:latest" ;;
-            alpine-dind) IMG="jclaveau/alpine-dind-playwright:latest" ;;
+          TAG="${{ needs.config.outputs.tag }}"
+          SC="${{ matrix.scenario }}"
+          case "$SC" in
+            baseline) IMG="catthehacker/ubuntu:act-22.04" ;;
+            official) IMG="mcr.microsoft.com/playwright:v${PW}-noble" ;;
+            *-gyp)    IMG="ghcr.io/jclaveau/${SC%-gyp}-playwright-gyp:${TAG}" ;;
+            *)        IMG="ghcr.io/jclaveau/${SC}-playwright:${TAG}" ;;
           esac
           echo "image=$IMG" >> "$GITHUB_OUTPUT"
       - name: Benchmark via act
@@ -312,14 +356,21 @@ jobs:
                   ds += f" (CV {c:.0f}%)"
               return ds, f"{'−' if d < 0 else '+'}{abs(d / base * 100):.0f}%"
 
-          order = ["baseline", "official", "ubuntu-dood", "ubuntu-dind", "alpine-dood", "alpine-dind"]
+          # Each slim scenario sits next to its -gyp twin so the compiler's pull cost is easy to read.
+          order = ["baseline", "official",
+                   "ubuntu-dood", "ubuntu-dood-gyp", "ubuntu-dind", "ubuntu-dind-gyp",
+                   "alpine-dood", "alpine-dood-gyp", "alpine-dind", "alpine-dind-gyp"]
           LABEL = {
               "baseline": "manual install",
               "official": "official container",
               "ubuntu-dood": "ubuntu-dood-playwright",
+              "ubuntu-dood-gyp": "ubuntu-dood-playwright-gyp",
               "ubuntu-dind": "ubuntu-dind-playwright",
+              "ubuntu-dind-gyp": "ubuntu-dind-playwright-gyp",
               "alpine-dood": "alpine-dood-playwright",
+              "alpine-dood-gyp": "alpine-dood-playwright-gyp",
               "alpine-dind": "alpine-dind-playwright",
+              "alpine-dind-gyp": "alpine-dind-playwright-gyp",
           }
 
           def table(mode, title):
@@ -415,7 +466,10 @@ jobs:
               "",
               act_table("all", "Via act — All browsers (local nektos/act runner)"),
               "",
-              "_`alpine-dood-playwright` and `alpine-dind-playwright` are Chromium-only (no Firefox/WebKit on musl). The **act** tables run each "
+              "_The `…-playwright-gyp` rows are the same image **plus the node-gyp toolchain** "
+              "(build-essential / build-base); compare each slim row with its `-gyp` twin to read the "
+              "compiler's pull cost. "
+              "`alpine-dood-playwright` and `alpine-dind-playwright` are Chromium-only (no Firefox/WebKit on musl). The **act** tables run each "
               "image as a local `nektos/act` runner, self-measured from `act` start; their *Image pull* "
               "also includes act's own start-up overhead, so it isn't directly comparable to the hosted "
               "`Initialize containers` time. The **warm** Δ columns exclude the pull (= install only) — "

@@ -9,8 +9,20 @@ other image in this repo builds on.
 - **Environment**: `LANG=C.UTF-8`, `CI=true`, `ImageOS=ubuntu24`,
   `RUNNER_TOOL_CACHE=/opt/hostedtoolcache` (+ `AGENT_TOOLSDIRECTORY`), and the `/opt/hostedtoolcache` dir.
 - **OS-level tools** — a curated subset of [`actions/runner-images`](https://github.com/actions/runner-images/blob/main/images/ubuntu/Ubuntu2404-Readme.md):
-  build-essential, pkg-config, git, curl, wget, gnupg, jq, zip/unzip, xz/bzip2/zstd/lz4, p7zip, rsync,
-  openssh-client, dnsutils, shellcheck, python3, … (see the `Dockerfile` for the full list).
+  pkg-config, git, curl, wget, gnupg, jq, zip/unzip, xz/bzip2/zstd/lz4, p7zip, rsync,
+  openssh-client, dnsutils, python3, … (see the `Dockerfile` for the full list).
+
+## What's deliberately omitted (and why)
+Unlike GitHub's `ubuntu-latest`, this base does **not** ship:
+- **the C/C++ build toolchain** (`build-essential` — gcc/g++/make): ~106 MB compressed that every
+  downstream image (`docker`, `dood`/`dind`, `node`, `pnpm`, `playwright`) would carry, while most CI
+  jobs never compile native code. Builds that *do* need it use the **`-gyp` variant**
+  (e.g. [`{os}-{mode}-pnpm-gyp`](../pnpm-gyp/README.md)), which adds the toolchain back.
+- **`shellcheck`** (~14 MB): a dev-only shell linter nothing invokes at runtime. `apt install shellcheck`
+  in your job if you lint shell.
+
+The only cost is strict `ubuntu-latest` parity — a workflow that compiles native modules works on the
+hosted runner but needs the `-gyp` image here. This is the deliberate trade that keeps the base slim.
 
 ## What it implies
 - **No Docker and no language runtimes** — those are added by the [`docker`](../docker/README.md) overlay

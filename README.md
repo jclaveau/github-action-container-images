@@ -16,11 +16,12 @@ Images are layered — each builds on the previous — and every layer above the
 **flavors**, `-dood` and `-dind`:
 
 ```
-ubuntu-gha-tools            GitHub ubuntu-latest mimic (users, env, OS tools)
+ubuntu-gha-tools            GitHub ubuntu-latest mimic (users, env, OS tools; slim — no compiler)
   └─ docker  (internal)     + Docker Engine & Compose
        ├─ dood              shares the host daemon (mounted socket)
        └─ dind              boots its own inner daemon
-            then:  node  →  pnpm  →  playwright      (each in both -dood and -dind)
+            then:  node ─┬─ pnpm ─────── playwright          (slim; each in both -dood and -dind)
+                         └─ pnpm-gyp ─── playwright-gyp       (+ node-gyp toolchain, for native addons)
 ```
 
 Variant images are named `<os>-<mode>[-<layer>]` (`os` ∈ {`ubuntu`,`alpine`}, `mode` ∈ {`dood`,`dind`}).
@@ -31,11 +32,13 @@ Playwright's bundled browsers and Firefox/WebKit have no musl builds). Each laye
 
 | Image | What it adds | Docs |
 | --- | --- | --- |
-| `ubuntu-gha-tools` | GitHub `ubuntu-latest` mimic (users, env, OS tools) | [README](ubuntu-gha-tools/README.md) |
+| `ubuntu-gha-tools` | GitHub `ubuntu-latest` mimic (users, env, OS tools; no compiler) | [README](ubuntu-gha-tools/README.md) |
 | `ubuntu-dood` / `ubuntu-dind` | + Docker Engine & Compose (the two flavors) | [dood](dood/README.md) · [dind](dind/README.md) |
-| `…-node` | + Node, npm, node-gyp build tools | [README](node/README.md) |
+| `…-node` | + Node, npm (slim — no compiler) | [README](node/README.md) |
 | `…-pnpm` | + pnpm | [README](pnpm/README.md) |
+| `…-pnpm-gyp` | + node-gyp toolchain (for native addons) | [README](pnpm-gyp/README.md) |
 | `…-playwright` | + Playwright | [README](playwright/README.md) |
+| `…-playwright-gyp` | + Playwright on the `-gyp` base | [README](pnpm-gyp/README.md) |
 
 (The `docker` layer is an internal, unpublished base — see [docker/README.md](docker/README.md).)
 

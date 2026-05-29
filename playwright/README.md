@@ -31,6 +31,9 @@ Track whether this ever changes:
 
 ## What it implies
 - Built for **both modes and both OSes**: `ubuntu-dood-playwright`, `alpine-dind-playwright`, etc.
+- **Slim — no compiler.** Built on the slim [`pnpm`](../pnpm/README.md) layer. If your tests' deps
+  compile native addons, use the **`…-playwright-gyp`** twin (the same layer built on
+  [`pnpm-gyp`](../pnpm-gyp/README.md)); its tag carries a `-gyp` suffix.
 - The **heaviest** layer (Ubuntu bundles browsers; Alpine pulls system Chromium + fonts).
 - The version-pinned tag carries the Playwright minor (`…-pwX.Y`).
 - This directory also holds the **Playwright test project** (`tests/`, `playwright.config.ts`) that CI

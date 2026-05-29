@@ -19,10 +19,13 @@ ENV LANG=C.UTF-8 \
     RUNNER_TOOL_CACHE=/opt/hostedtoolcache \
     AGENT_TOOLSDIRECTORY=/opt/hostedtoolcache
 
+# Deliberately NOT installed (unlike actions/runner-images ubuntu-24.04 — see README):
+#  - the C/C++ toolchain (build-essential): ~106 MB compressed dead weight in this shared base since
+#    most jobs never compile. Native-addon builds use the `-gyp` variant (e.g. {os}-{mode}-pnpm-gyp).
+#  - shellcheck: ~14 MB dev-only shell linter nothing invokes at runtime; `apt install shellcheck` it.
 RUN echo "OS-level tools: a curated subset of actions/runner-images ubuntu-24.04 (no runtimes/SDKs)" \
     && apt-get update && apt-get install -y --no-install-recommends \
        apt-utils \
-       build-essential \
        pkg-config \
        git \
        curl \
@@ -50,7 +53,6 @@ RUN echo "OS-level tools: a curated subset of actions/runner-images ubuntu-24.04
        netcat-openbsd \
        parallel \
        brotli \
-       shellcheck \
        time \
        sudo \
        python3 \

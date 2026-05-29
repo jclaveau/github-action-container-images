@@ -224,6 +224,49 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
 
+  # node-gyp variant: pnpm + the C/C++ toolchain the base gha-tools drops. Built from ./pnpm-gyp as a
+  # SIBLING of build-pnpm-* (both FROM the node layer) so the slim and -gyp chains build in parallel.
+  build-pnpm-gyp-dood:
+    runs-on: ubuntu-latest
+    needs: [github-context, build-node-dood]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        os: [ubuntu, alpine]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-layer
+        with:
+          image: ${{ matrix.os }}-dood-pnpm-gyp
+          context: ./pnpm-gyp
+          dockerfile: ${{ matrix.os == 'alpine' && 'Dockerfile.alpine' || 'Dockerfile' }}
+          base_image: ${{ matrix.os }}-dood-node
+          build_tag: ${{ needs.github-context.outputs.build_tag }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  build-pnpm-gyp-dind:
+    runs-on: ubuntu-latest
+    needs: [github-context, build-node-dind]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        os: [ubuntu, alpine]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-layer
+        with:
+          image: ${{ matrix.os }}-dind-pnpm-gyp
+          context: ./pnpm-gyp
+          dockerfile: ${{ matrix.os == 'alpine' && 'Dockerfile.alpine' || 'Dockerfile' }}
+          base_image: ${{ matrix.os }}-dind-node
+          build_tag: ${{ needs.github-context.outputs.build_tag }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+
   build-playwright-dood:
     runs-on: ubuntu-latest
     needs: [github-context, build-pnpm-dood]
@@ -265,6 +308,49 @@ jobs:
           github_token: ${{ secrets.GITHUB_TOKEN }}
 
 
+  # Playwright on the node-gyp base: the SAME ./playwright layer, only the base differs (pnpm-gyp), for
+  # consumers needing Playwright + native builds and for the slim-vs-gyp benchmark comparison.
+  build-playwright-gyp-dood:
+    runs-on: ubuntu-latest
+    needs: [github-context, build-pnpm-gyp-dood]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        os: [ubuntu, alpine]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-layer
+        with:
+          image: ${{ matrix.os }}-dood-playwright-gyp
+          context: ./playwright
+          dockerfile: ${{ matrix.os == 'alpine' && 'Dockerfile.alpine' || 'Dockerfile' }}
+          base_image: ${{ matrix.os }}-dood-pnpm-gyp
+          build_tag: ${{ needs.github-context.outputs.build_tag }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+  build-playwright-gyp-dind:
+    runs-on: ubuntu-latest
+    needs: [github-context, build-pnpm-gyp-dind]
+    permissions:
+      contents: read
+      packages: write
+    strategy:
+      matrix:
+        os: [ubuntu, alpine]
+    steps:
+      - uses: actions/checkout@v4
+      - uses: ./.github/actions/build-layer
+        with:
+          image: ${{ matrix.os }}-dind-playwright-gyp
+          context: ./playwright
+          dockerfile: ${{ matrix.os == 'alpine' && 'Dockerfile.alpine' || 'Dockerfile' }}
+          base_image: ${{ matrix.os }}-dind-pnpm-gyp
+          build_tag: ${{ needs.github-context.outputs.build_tag }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+
+
   # ----------------------------------------------------------------------------
   # Tests: split per the README's Usage vs Effects contract.
   #  - *-usage   : the documented usage works (daemon reachable, compose comes up). Mode-agnostic.
@@ -298,7 +384,9 @@ jobs:
       - name: It is the expected OS
         run: . /etc/os-release && test "$ID" = "${{ matrix.os }}"
       - name: Curated OS tools are present
-        run: for t in git jq g++ make zip unzip rsync shellcheck python3 sudo; do command -v "$t" >/dev/null || { echo "missing $t"; exit 1; }; done
+        run: for t in git jq zip unzip rsync python3 sudo; do command -v "$t" >/dev/null || { echo "missing $t"; exit 1; }; done
+      - name: Build toolchain + shellcheck are intentionally absent (slim base; see README)
+        run: for t in g++ make shellcheck; do ! command -v "$t" >/dev/null || { echo "unexpectedly present $t"; exit 1; }; done
       # The dev env must be identical across ubuntu/alpine: assert each alias resolves to the *exact*
       # same definition (not just that it exists) as the `runner` user (steps run as root, so su to
       # runner via a login+interactive shell — the real `docker run` / `act` experience). `grep -qx`
@@ -442,28 +530,9 @@ jobs:
     steps:
       - run: node --version
       - run: npm --version
-      - run: python3 --version
-      - run: make --version
-      - run: g++ --version
-
-      - name: Compile a trivial native addon with node-gyp
-        run: |
-          mkdir -p /tmp/gyp-test && cd /tmp/gyp-test
-          cat > hello.cc <<'EOF'
-          #include <node.h>
-          namespace demo {
-            using v8::FunctionCallbackInfo; using v8::Isolate;
-            using v8::Local; using v8::Object; using v8::String; using v8::Value;
-            void Method(const FunctionCallbackInfo<Value>& a){
-              a.GetReturnValue().Set(String::NewFromUtf8(a.GetIsolate(),"ok").ToLocalChecked());
-            }
-            void Init(Local<Object> e){ NODE_SET_METHOD(e,"hello",Method); }
-            NODE_MODULE(NODE_GYP_MODULE_NAME, Init)
-          }
-          EOF
-          printf '{ "targets": [ { "target_name": "hello", "sources": [ "hello.cc" ] } ] }' > binding.gyp
-          npx -y node-gyp rebuild
-          node -e "console.log(require('./build/Release/hello.node').hello())"
+      # node is slim now: the node-gyp toolchain lives in the -gyp variant, not here — lock that contract.
+      - name: node-gyp compiler is intentionally absent (use the -gyp variant for native addons)
+        run: for t in g++ make; do ! command -v "$t" >/dev/null || { echo "unexpectedly present $t"; exit 1; }; done
 
 
   test-pnpm-usage:
@@ -488,9 +557,11 @@ jobs:
       - run: pnpm --version
 
 
-  test-playwright-usage:
+  # The -gyp variant restores the node-gyp toolchain on top of slim pnpm. Asserts the compiler is back
+  # and that a real native addon compiles (the test moved here from test-node-usage when node went slim).
+  test-pnpm-gyp-usage:
     runs-on: ubuntu-latest
-    needs: [github-context, build-playwright-dood, build-playwright-dind]
+    needs: [github-context, build-pnpm-gyp-dood, build-pnpm-gyp-dind]
     timeout-minutes: 5
     strategy:
       fail-fast: false
@@ -498,7 +569,51 @@ jobs:
         os: [ubuntu, alpine]
         mode: [dood, dind]
     container:
-      image: ghcr.io/jclaveau/${{ matrix.os }}-${{ matrix.mode }}-playwright:${{ needs.github-context.outputs.build_tag }}
+      image: ghcr.io/jclaveau/${{ matrix.os }}-${{ matrix.mode }}-pnpm-gyp:${{ needs.github-context.outputs.build_tag }}
+      credentials:
+        username: ${{ github.actor }}
+        password: ${{ secrets.GITHUB_TOKEN }}
+      options: >-
+        --privileged
+        --env "HOME=/home/runner"
+    steps:
+      - run: pnpm --version
+      - run: python3 --version
+      - run: make --version
+      - run: g++ --version
+
+      - name: Compile a trivial native addon with node-gyp
+        run: |
+          mkdir -p /tmp/gyp-test && cd /tmp/gyp-test
+          cat > hello.cc <<'EOF'
+          #include <node.h>
+          namespace demo {
+            using v8::FunctionCallbackInfo; using v8::Isolate;
+            using v8::Local; using v8::Object; using v8::String; using v8::Value;
+            void Method(const FunctionCallbackInfo<Value>& a){
+              a.GetReturnValue().Set(String::NewFromUtf8(a.GetIsolate(),"ok").ToLocalChecked());
+            }
+            void Init(Local<Object> e){ NODE_SET_METHOD(e,"hello",Method); }
+            NODE_MODULE(NODE_GYP_MODULE_NAME, Init)
+          }
+          EOF
+          printf '{ "targets": [ { "target_name": "hello", "sources": [ "hello.cc" ] } ] }' > binding.gyp
+          npx -y node-gyp rebuild
+          node -e "console.log(require('./build/Release/hello.node').hello())"
+
+
+  test-playwright-usage:
+    runs-on: ubuntu-latest
+    needs: [github-context, build-playwright-dood, build-playwright-dind, build-playwright-gyp-dood, build-playwright-gyp-dind]
+    timeout-minutes: 5
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu, alpine]
+        mode: [dood, dind]
+        variant: [slim, gyp]   # slim = ...-playwright; gyp = ...-playwright-gyp (same PW, gyp base)
+    container:
+      image: ghcr.io/jclaveau/${{ matrix.os }}-${{ matrix.mode }}-playwright${{ matrix.variant == 'gyp' && '-gyp' || '' }}:${{ needs.github-context.outputs.build_tag }}
       credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
@@ -624,14 +739,14 @@ jobs:
 
   promote:
     runs-on: ubuntu-latest
-    needs: [github-context, versions, test-gha-tools-usage, test-dood-dind-usage, test-dood-dind-effects, test-dood-dind-act, test-node-usage, test-pnpm-usage, test-playwright-usage]
+    needs: [github-context, versions, test-gha-tools-usage, test-dood-dind-usage, test-dood-dind-effects, test-dood-dind-act, test-node-usage, test-pnpm-usage, test-pnpm-gyp-usage, test-playwright-usage]
     permissions:
       contents: read
       packages: write
     strategy:
       matrix:
         os: [ubuntu, alpine]
-        image: [gha-tools, dood, dind, dood-node, dind-node, dood-pnpm, dind-pnpm, dood-playwright, dind-playwright]
+        image: [gha-tools, dood, dind, dood-node, dind-node, dood-pnpm, dind-pnpm, dood-pnpm-gyp, dind-pnpm-gyp, dood-playwright, dind-playwright, dood-playwright-gyp, dind-playwright-gyp]
     steps:
       - uses: docker/setup-buildx-action@v3
       # GHCR login to READ the tested source image.
@@ -655,10 +770,12 @@ jobs:
           PW: ${{ matrix.os == 'alpine' && needs.versions.outputs.alpine_pw || needs.versions.outputs.pw }}
         run: |
           case "${{ matrix.image }}" in
-            gha-tools|dood|dind)             TAG="${OS}";;
-            dood-node|dind-node)             TAG="${OS}-${NODE}";;
-            dood-pnpm|dind-pnpm)             TAG="${OS}-${NODE}-${PNPM}";;
-            dood-playwright|dind-playwright) TAG="${OS}-${NODE}-${PNPM}-${PW}";;
+            gha-tools|dood|dind)                     TAG="${OS}";;
+            dood-node|dind-node)                     TAG="${OS}-${NODE}";;
+            dood-pnpm|dind-pnpm)                     TAG="${OS}-${NODE}-${PNPM}";;
+            dood-pnpm-gyp|dind-pnpm-gyp)             TAG="${OS}-${NODE}-${PNPM}-gyp";;
+            dood-playwright|dind-playwright)         TAG="${OS}-${NODE}-${PNPM}-${PW}";;
+            dood-playwright-gyp|dind-playwright-gyp) TAG="${OS}-${NODE}-${PNPM}-${PW}-gyp";;
           esac
           echo "tag=${TAG}" >> "$GITHUB_OUTPUT"
       - id: meta
