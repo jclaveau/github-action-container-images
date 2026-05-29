@@ -1,0 +1,57 @@
+name: build-layer
+description: >-
+  Build one image layer and push it to GHCR under the run-scoped build tag, with registry-backed
+  buildx cache. The whole pipeline's build mechanics (buildx, ghcr login, metadata, cache) live here so
+  each build job in the workflow stays a thin, per-layer call.
+
+inputs:
+  image:
+    description: GHCR repo short name under ghcr.io/jclaveau, e.g. ubuntu-docker
+    required: true
+  context:
+    description: Docker build context directory, e.g. ./docker
+    required: true
+  build_tag:
+    description: Run-scoped tag the build is pushed under (e.g. sha-<sha>)
+    required: true
+  base_image:
+    description: Base image short name for the BASE_IMAGE build-arg; empty for the root layer
+    required: false
+    default: ""
+  docker_group_id:
+    description: DOCKER_GROUP_ID build-arg; only the docker layer needs it
+    required: false
+    default: ""
+  github_token:
+    description: Token for the GHCR push (composite actions can't read secrets; pass secrets.GITHUB_TOKEN)
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: docker/setup-buildx-action@v3
+      with:
+        buildkitd-flags: --debug
+    - uses: docker/login-action@v3
+      with:
+        registry: ghcr.io
+        username: ${{ github.actor }}
+        password: ${{ inputs.github_token }}
+    - id: meta
+      uses: docker/metadata-action@v5
+      with:
+        images: ghcr.io/jclaveau/${{ inputs.image }}
+        # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
+        tags: type=raw,value=${{ inputs.build_tag }}
+    - uses: docker/build-push-action@v5
+      with:
+        context: ${{ inputs.context }}
+        push: true # PRs push too so downstream jobs can pull this exact build
+        tags: ${{ steps.meta.outputs.tags }}
+        labels: ${{ steps.meta.outputs.labels }}
+        # Empty lines are dropped, so the root layer / non-docker layers emit no build-args.
+        build-args: |
+          ${{ inputs.base_image && format('BASE_IMAGE=ghcr.io/jclaveau/{0}:{1}', inputs.base_image, inputs.build_tag) || '' }}
+          ${{ inputs.docker_group_id && format('DOCKER_GROUP_ID={0}', inputs.docker_group_id) || '' }}
+        cache-from: type=registry,ref=ghcr.io/jclaveau/${{ inputs.image }}:buildcache
+        cache-to: type=registry,ref=ghcr.io/jclaveau/${{ inputs.image }}:buildcache,mode=max

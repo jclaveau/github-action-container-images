@@ -74,28 +74,12 @@ jobs:
         os: [ubuntu]
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: ./.github/actions/build-layer
         with:
-          buildkitd-flags: --debug
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/jclaveau/${{ matrix.os }}-gha-tools
-          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
-          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
-      - uses: docker/build-push-action@v5
-        with:
+          image: ${{ matrix.os }}-gha-tools
           context: ./ubuntu-gha-tools
-          push: true # PRs push too so downstream jobs can pull this exact build
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          cache-from: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-gha-tools:buildcache
-          cache-to: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-gha-tools:buildcache,mode=max
+          build_tag: ${{ needs.github-context.outputs.build_tag }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
   # Unpublished shared base: ubuntu-gha-tools + docker/compose. Only ever pushed under the
   # throwaway build tag (never promoted); dood and dind are built from it in parallel.
@@ -110,30 +94,14 @@ jobs:
         os: [ubuntu]
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: ./.github/actions/build-layer
         with:
-          buildkitd-flags: --debug
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/jclaveau/${{ matrix.os }}-docker
-          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
-      - uses: docker/build-push-action@v5
-        with:
+          image: ${{ matrix.os }}-docker
           context: ./docker
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BASE_IMAGE=ghcr.io/jclaveau/${{ matrix.os }}-gha-tools:${{ needs.github-context.outputs.build_tag }}
-            DOCKER_GROUP_ID=${{ needs.github-context.outputs.docker_group_id }}
-          cache-from: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-docker:buildcache
-          cache-to: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-docker:buildcache,mode=max
+          base_image: ${{ matrix.os }}-gha-tools
+          docker_group_id: ${{ needs.github-context.outputs.docker_group_id }}
+          build_tag: ${{ needs.github-context.outputs.build_tag }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
   build-dood:
     runs-on: ubuntu-latest
@@ -146,30 +114,13 @@ jobs:
         os: [ubuntu]
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: ./.github/actions/build-layer
         with:
-          buildkitd-flags: --debug
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/jclaveau/${{ matrix.os }}-dood
-          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
-          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
-      - uses: docker/build-push-action@v5
-        with:
+          image: ${{ matrix.os }}-dood
           context: ./dood
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BASE_IMAGE=ghcr.io/jclaveau/${{ matrix.os }}-docker:${{ needs.github-context.outputs.build_tag }}
-          cache-from: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dood:buildcache
-          cache-to: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dood:buildcache,mode=max
+          base_image: ${{ matrix.os }}-docker
+          build_tag: ${{ needs.github-context.outputs.build_tag }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
   build-dind:
     runs-on: ubuntu-latest
@@ -182,30 +133,13 @@ jobs:
         os: [ubuntu]
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: ./.github/actions/build-layer
         with:
-          buildkitd-flags: --debug
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/jclaveau/${{ matrix.os }}-dind
-          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
-          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
-      - uses: docker/build-push-action@v5
-        with:
+          image: ${{ matrix.os }}-dind
           context: ./dind
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BASE_IMAGE=ghcr.io/jclaveau/${{ matrix.os }}-docker:${{ needs.github-context.outputs.build_tag }}
-          cache-from: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dind:buildcache
-          cache-to: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dind:buildcache,mode=max
+          base_image: ${{ matrix.os }}-docker
+          build_tag: ${{ needs.github-context.outputs.build_tag }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
 
   build-node-dood:
@@ -219,30 +153,13 @@ jobs:
         os: [ubuntu]
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: ./.github/actions/build-layer
         with:
-          buildkitd-flags: --debug
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/jclaveau/${{ matrix.os }}-dood-node
-          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
-          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
-      - uses: docker/build-push-action@v5
-        with:
+          image: ${{ matrix.os }}-dood-node
           context: ./node
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BASE_IMAGE=ghcr.io/jclaveau/${{ matrix.os }}-dood:${{ needs.github-context.outputs.build_tag }}
-          cache-from: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dood-node:buildcache
-          cache-to: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dood-node:buildcache,mode=max
+          base_image: ${{ matrix.os }}-dood
+          build_tag: ${{ needs.github-context.outputs.build_tag }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
   build-node-dind:
     runs-on: ubuntu-latest
@@ -255,30 +172,13 @@ jobs:
         os: [ubuntu]
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: ./.github/actions/build-layer
         with:
-          buildkitd-flags: --debug
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/jclaveau/${{ matrix.os }}-dind-node
-          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
-          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
-      - uses: docker/build-push-action@v5
-        with:
+          image: ${{ matrix.os }}-dind-node
           context: ./node
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BASE_IMAGE=ghcr.io/jclaveau/${{ matrix.os }}-dind:${{ needs.github-context.outputs.build_tag }}
-          cache-from: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dind-node:buildcache
-          cache-to: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dind-node:buildcache,mode=max
+          base_image: ${{ matrix.os }}-dind
+          build_tag: ${{ needs.github-context.outputs.build_tag }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
 
   build-pnpm-dood:
@@ -292,30 +192,13 @@ jobs:
         os: [ubuntu]
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: ./.github/actions/build-layer
         with:
-          buildkitd-flags: --debug
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/jclaveau/${{ matrix.os }}-dood-pnpm
-          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
-          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
-      - uses: docker/build-push-action@v5
-        with:
+          image: ${{ matrix.os }}-dood-pnpm
           context: ./pnpm
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BASE_IMAGE=ghcr.io/jclaveau/${{ matrix.os }}-dood-node:${{ needs.github-context.outputs.build_tag }}
-          cache-from: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dood-pnpm:buildcache
-          cache-to: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dood-pnpm:buildcache,mode=max
+          base_image: ${{ matrix.os }}-dood-node
+          build_tag: ${{ needs.github-context.outputs.build_tag }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
   build-pnpm-dind:
     runs-on: ubuntu-latest
@@ -328,30 +211,13 @@ jobs:
         os: [ubuntu]
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: ./.github/actions/build-layer
         with:
-          buildkitd-flags: --debug
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/jclaveau/${{ matrix.os }}-dind-pnpm
-          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
-          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
-      - uses: docker/build-push-action@v5
-        with:
+          image: ${{ matrix.os }}-dind-pnpm
           context: ./pnpm
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BASE_IMAGE=ghcr.io/jclaveau/${{ matrix.os }}-dind-node:${{ needs.github-context.outputs.build_tag }}
-          cache-from: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dind-pnpm:buildcache
-          cache-to: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dind-pnpm:buildcache,mode=max
+          base_image: ${{ matrix.os }}-dind-node
+          build_tag: ${{ needs.github-context.outputs.build_tag }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
 
   build-playwright-dood:
@@ -365,30 +231,13 @@ jobs:
         os: [ubuntu]
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: ./.github/actions/build-layer
         with:
-          buildkitd-flags: --debug
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/jclaveau/${{ matrix.os }}-dood-playwright
-          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
-          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
-      - uses: docker/build-push-action@v5
-        with:
+          image: ${{ matrix.os }}-dood-playwright
           context: ./playwright
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BASE_IMAGE=ghcr.io/jclaveau/${{ matrix.os }}-dood-pnpm:${{ needs.github-context.outputs.build_tag }}
-          cache-from: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dood-playwright:buildcache
-          cache-to: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dood-playwright:buildcache,mode=max
+          base_image: ${{ matrix.os }}-dood-pnpm
+          build_tag: ${{ needs.github-context.outputs.build_tag }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
   build-playwright-dind:
     runs-on: ubuntu-latest
@@ -401,30 +250,13 @@ jobs:
         os: [ubuntu]
     steps:
       - uses: actions/checkout@v4
-      - uses: docker/setup-buildx-action@v3
+      - uses: ./.github/actions/build-layer
         with:
-          buildkitd-flags: --debug
-      - uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
-      - id: meta
-        uses: docker/metadata-action@v5
-        with:
-          images: ghcr.io/jclaveau/${{ matrix.os }}-dind-playwright
-          # Build pushes only the throwaway run-scoped tag; consumer tags are added by `promote`.
-          tags: type=raw,value=${{ needs.github-context.outputs.build_tag }}
-      - uses: docker/build-push-action@v5
-        with:
+          image: ${{ matrix.os }}-dind-playwright
           context: ./playwright
-          push: true
-          tags: ${{ steps.meta.outputs.tags }}
-          labels: ${{ steps.meta.outputs.labels }}
-          build-args: |
-            BASE_IMAGE=ghcr.io/jclaveau/${{ matrix.os }}-dind-pnpm:${{ needs.github-context.outputs.build_tag }}
-          cache-from: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dind-playwright:buildcache
-          cache-to: type=registry,ref=ghcr.io/jclaveau/${{ matrix.os }}-dind-playwright:buildcache,mode=max
+          base_image: ${{ matrix.os }}-dind-pnpm
+          build_tag: ${{ needs.github-context.outputs.build_tag }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
 
 
   # ----------------------------------------------------------------------------
@@ -446,7 +278,7 @@ jobs:
         os: [ubuntu]
     container:
       image: ghcr.io/jclaveau/${{ matrix.os }}-gha-tools:${{ needs.github-context.outputs.build_tag }}
-      credentials:                       # GHCR packages are private; pull with GITHUB_TOKEN
+      credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
     steps:
@@ -478,7 +310,7 @@ jobs:
         mode: [dood, dind]
     container:
       image: ghcr.io/jclaveau/${{ matrix.os }}-${{ matrix.mode }}:${{ needs.github-context.outputs.build_tag }}
-      credentials:                       # GHCR packages are private; pull with GITHUB_TOKEN
+      credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
       # dind: point clients at the inner daemon via the container env (NOT $GITHUB_ENV, which would
@@ -525,7 +357,7 @@ jobs:
         mode: [dood, dind]
     container:
       image: ghcr.io/jclaveau/${{ matrix.os }}-${{ matrix.mode }}:${{ needs.github-context.outputs.build_tag }}
-      credentials:                       # GHCR packages are private; pull with GITHUB_TOKEN
+      credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
       options: >-
@@ -585,7 +417,7 @@ jobs:
         mode: [dood, dind]
     container:
       image: ghcr.io/jclaveau/${{ matrix.os }}-${{ matrix.mode }}-node:${{ needs.github-context.outputs.build_tag }}
-      credentials:                       # GHCR packages are private; pull with GITHUB_TOKEN
+      credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
       options: >-
@@ -629,7 +461,7 @@ jobs:
         mode: [dood, dind]
     container:
       image: ghcr.io/jclaveau/${{ matrix.os }}-${{ matrix.mode }}-pnpm:${{ needs.github-context.outputs.build_tag }}
-      credentials:                       # GHCR packages are private; pull with GITHUB_TOKEN
+      credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
       options: >-
@@ -651,7 +483,7 @@ jobs:
         mode: [dood, dind]
     container:
       image: ghcr.io/jclaveau/${{ matrix.os }}-${{ matrix.mode }}-playwright:${{ needs.github-context.outputs.build_tag }}
-      credentials:                       # GHCR packages are private; pull with GITHUB_TOKEN
+      credentials:
         username: ${{ github.actor }}
         password: ${{ secrets.GITHUB_TOKEN }}
       options: >-
