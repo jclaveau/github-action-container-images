@@ -12,18 +12,33 @@ jobs:
         working-directory: playwright
         run: |
           set -e
+          set -x   # dev mode: echo every command so we see exactly where a slow/stuck install sits
           echo "ACT_STEP_START=$(date +%s.%N)"   # after act's image pull / container start
+          # rx baseline for "install download size" — delta vs just-before-tests = bytes pulled by
+          # pnpm/npm/apt during the install phase. eth0 inside the act runner.
+          NB=$(awk '/^[ \t]*eth0:/{print $2}' /proc/net/dev)
           command -v pnpm >/dev/null 2>&1 || npm install -g pnpm@9
           pnpm install
           if [ "$BROWSERS" = "all" ]; then
             PROJECTS="--project=chromium --project=firefox --project=webkit"
-            [ "$SCENARIO" = "baseline" ] && pnpm exec playwright install --with-deps
+            # --only-shell installs the slim headless shell — apples-to-apples with our images that bake it.
+            [ "$SCENARIO" = "baseline" ] && pnpm exec playwright install --with-deps --only-shell
           else
             PROJECTS="--project=chromium"
-            [ "$SCENARIO" = "baseline" ] && pnpm exec playwright install --with-deps chromium
+            [ "$SCENARIO" = "baseline" ] && pnpm exec playwright install --with-deps --only-shell chromium
           fi
           # official MS image runs as root; Firefox/WebKit need a root-owned $HOME
-          [ "$SCENARIO" = "official" ] && export HOME=/root
+          # MS Playwright image (used by `official`, `official-gyp`, and `baseline`) runs as root and
+          # Firefox/WebKit reject $HOME=/github/home (the GHA-mounted default, owned by pwuser).
+          case "$SCENARIO" in official*|baseline) export HOME=/root ;; esac
+          # official-gyp = official MS image + the node-gyp toolchain installed at runtime; this is the
+          # apt-install cost our `*-playwright-gyp` images bake away. apt as root (MS image runs as root).
+          [ "$SCENARIO" = "official-gyp" ] && apt-get update && apt-get install -y build-essential
+          # Install docker for MS-image-based scenarios if missing (baseline/official/official-gyp) —
+          # needed for the "docker compose + pw" use case our dood/dind images bake in.
+          case "$SCENARIO" in official*|baseline) command -v docker >/dev/null || (apt-get update && apt-get install -y docker.io docker-compose-v2) ;; esac
+          NA=$(awk '/^[ \t]*eth0:/{print $2}' /proc/net/dev)
+          echo "ACT_INSTALL_DL_BYTES=$((NA-NB))"
           echo "ACT_TEST_START=$(date +%s.%N)"
           set +e
           pnpm exec playwright test $PROJECTS

@@ -12,22 +12,16 @@ name: Benchmark Playwright
 # chromium tables. Our images are compared in both dood and dind flavors, slim and -gyp.)
 
 on:
-  # Auto-run after a successful build so the commit's freshly-pushed GHCR sha images exist (a push can't
-  # bench itself — the images aren't built yet, and GHCR has no `latest`). Manual dispatch can target any tag.
-  workflow_run:
-    workflows: ["Test and Publish"]
-    types: [completed]
-    branches: [main]
+  # DEV MODE: dispatch-only — benches Docker Hub :latest, no dependence on a fresh build. For per-commit
+  # stats restore the workflow_run trigger + GHCR sha tags + credentials/login steps below.
   workflow_dispatch:
     inputs:
       pw_version:
         description: Playwright version to benchmark (must match the published image tags)
         default: '1.50.1'
       image_tag:
-        description: >-
-          GHCR tag for OUR images, e.g. sha-<sha>. Empty = sha of this commit (dispatch) or of the build
-          that triggered the run (workflow_run).
-        default: ''
+        description: Tag for OUR images on Docker Hub (e.g. latest, or a pinned tag).
+        default: 'latest'
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
@@ -35,15 +29,13 @@ concurrency:
 
 permissions:
   contents: read
-  packages: read   # pull our private GHCR sha images
+  # DEV MODE: bench pulls Docker Hub :latest (public). For GHCR sha-* mode, add `packages: read`.
 
 jobs:
   # Emits the container matrix as JSON so the official image tag can embed the chosen Playwright version
   # (a static matrix.include can't reference inputs). Each scenario runs in both browser modes; alpine is
   # Chromium-only, so it gets a single cell.
   config:
-    # workflow_run fires regardless of the build's result; only bench if it succeeded (images exist).
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
     runs-on: ubuntu-latest
     outputs:
       matrix: ${{ steps.c.outputs.matrix }}
@@ -52,47 +44,46 @@ jobs:
       - id: c
         run: |
           PW="${{ github.event.inputs.pw_version || '1.50.1' }}"
-          # OUR images are benchmarked from GHCR by tag. Empty input => the sha the triggering build pushed
-          # (workflow_run.head_sha) or this commit's sha (dispatch). official stays on MCR.
-          TAG="${{ github.event.inputs.image_tag }}"
-          if [ -z "$TAG" ]; then
-            if [ "${{ github.event_name }}" = "workflow_run" ]; then
-              TAG="sha-${{ github.event.workflow_run.head_sha }}"
-            else
-              TAG="sha-${{ github.sha }}"
-            fi
-          fi
+          TAG="${{ github.event.inputs.image_tag || 'latest' }}"
           echo "tag=$TAG" >> "$GITHUB_OUTPUT"
           OFFICIAL="mcr.microsoft.com/playwright:v${PW}-noble"
           HOME_OPT="--env HOME=/home/runner"
-          GHCR="ghcr.io/jclaveau"
+          GHCR="jclaveau"   # DEV MODE: Docker Hub base (public). For sha mode change to "ghcr.io/jclaveau".
           # Our images come in slim ("") and node-gyp ("-gyp") variants, benched side-by-side. Ubuntu runs
           # both browser modes; alpine is Chromium-only. Each base cell repeats 10× (run 1..10).
           MATRIX="$(jq -cn --arg off "$OFFICIAL" --arg h "$HOME_OPT" --arg ghcr "$GHCR" --arg tag "$TAG" '
             def img($p; $g): $ghcr + "/" + $p + "-playwright" + $g + ":" + $tag;
             ( [ {scenario:"official", image:$off, options:"--env HOME=/root", browsers:"chromium"},
-                {scenario:"official", image:$off, options:"--env HOME=/root", browsers:"all"} ]
+                {scenario:"official", image:$off, options:"--env HOME=/root", browsers:"all"},
+                {scenario:"official-gyp", image:$off, options:"--env HOME=/root", browsers:"chromium"},
+                {scenario:"official-gyp", image:$off, options:"--env HOME=/root", browsers:"all"} ]
               + [ ("ubuntu-dood","ubuntu-dind") as $p | ("","-gyp") as $g | ("chromium","all") as $b
                   | {scenario:($p+$g), image:img($p;$g), options:$h, browsers:$b} ]
               + [ ("alpine-dood","alpine-dind") as $p | ("","-gyp") as $g
                   | {scenario:($p+$g), image:img($p;$g), options:$h, browsers:"chromium"} ]
             ) as $base
-            | {include: [ $base[] as $b | range(1;11) as $r | $b + {run:$r} ]}')"
+            | {include: [ $base[] as $b | range(1;6) as $r | $b + {run:$r} ]}')"   # 5×; bump to range(1;11) for full stats
           echo "matrix=$MATRIX" >> "$GITHUB_OUTPUT"
 
   # The thing we're beating: a bare runner installing Playwright + browsers + system deps from scratch.
+  # `baseline-gyp` adds an explicit `apt install build-essential` so the with-gyp tables have an honest
+  # manual reference (cost ≈ 0 because ubuntu-latest already ships gcc/g++/make).
   baseline:
-    name: bench-baseline-${{ matrix.browsers }}-${{ matrix.run }}
-    if: ${{ github.event_name == 'workflow_dispatch' || github.event.workflow_run.conclusion == 'success' }}
+    name: bench-${{ matrix.scenario }}-${{ matrix.browsers }}-${{ matrix.run }}
     runs-on: ubuntu-latest
     timeout-minutes: 20
     strategy:
       fail-fast: false
       matrix:
+        scenario: [baseline, baseline-gyp]
         browsers: [chromium, all]
-        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        run: [1, 2, 3, 4, 5]
     steps:
       - uses: actions/checkout@v4
+      # Network rx baseline — every install step that follows downloads bytes (pnpm tarballs, apt debs,
+      # PW browser CDN); we delta /proc/net/dev:eth0 here vs just-before-tests for the "full dl size".
+      - name: Capture pre-install rx bytes
+        run: awk '/^[ \t]*eth0:/{print $2}' /proc/net/dev > /tmp/nb_rx
       - uses: actions/setup-node@v4
         with:
           node-version: '22'   # no cache: we measure the cold install on purpose
@@ -101,12 +92,29 @@ jobs:
       - name: Install project deps
         working-directory: playwright
         run: pnpm install
+      - name: Install node-gyp toolchain
+        if: ${{ matrix.scenario == 'baseline-gyp' }}
+        # The metapackage is ~already satisfied on ubuntu-latest; install explicitly so the row in the
+        # gyp tables represents "manual gyp install" honestly (cost ≈ 0).
+        run: sudo apt-get install -y build-essential
+      - name: Install docker
+        # Skip if docker is already on the runner (ubuntu-latest preinstalls docker-ce, and docker.io
+        # would conflict with the existing containerd.io). On MS PW image / other no-docker bases the
+        # install runs; on ubuntu-latest it's a real noop — honest cost for "docker compose + pw[+ gyp]".
+        run: command -v docker >/dev/null || (sudo apt-get update && sudo apt-get install -y docker.io docker-compose-v2)
       - name: Install Playwright browsers + system deps
         working-directory: playwright
         run: |
-          # empty browser arg installs every browser; otherwise just chromium
+          # --only-shell installs the slim headless shell (no X11/Mesa/full font set) — matches what
+          # OUR *-playwright images bake in, so this is an apples-to-apples comparison.
           [ "${{ matrix.browsers }}" = "all" ] && B="" || B="chromium"
-          pnpm exec playwright install --with-deps $B
+          pnpm exec playwright install --with-deps --only-shell $B
+      - name: Compute install download size
+        run: |
+          NA=$(awk '/^[ \t]*eth0:/{print $2}' /proc/net/dev)
+          NB=$(cat /tmp/nb_rx)
+          echo $(( (NA - NB) / 1048576 )) > /tmp/install-dl-mb.txt
+          echo "install dl = $(cat /tmp/install-dl-mb.txt) MB"
       - name: Run Playwright tests
         working-directory: playwright
         run: |
@@ -116,6 +124,13 @@ jobs:
             P="--project=chromium"
           fi
           pnpm exec playwright test $P
+      - name: Upload install download size
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-dl-${{ matrix.scenario }}-${{ matrix.browsers }}-${{ matrix.run }}
+          path: /tmp/install-dl-mb.txt
+          if-no-files-found: ignore
 
   # Container scenarios: the official MS image and our two published images, each in both browser modes.
   container:
@@ -129,24 +144,41 @@ jobs:
     container:
       image: ${{ matrix.image }}
       options: ${{ matrix.options }}
-      # Our images live on (private) GHCR; the github token authenticates the pull. The official cell is
-      # on MCR — login there succeeds and the pull stays anonymous, so the same credentials are harmless.
-      credentials:
-        username: ${{ github.actor }}
-        password: ${{ secrets.GITHUB_TOKEN }}
+      # DEV MODE: all images public (Docker Hub jclaveau/... + MCR official); no credentials needed.
     steps:
       - uses: actions/checkout@v4
+      - name: Capture pre-install rx bytes
+        # Inside the container's netns — counts only bytes the container's install steps fetch.
+        run: awk '/^[ \t]*eth0:/{print $2}' /proc/net/dev > /tmp/nb_rx
       - name: Ensure pnpm
         run: command -v pnpm || npm install -g pnpm@9   # no-op on our images; installs on the MS image
       - name: Install project deps
         working-directory: playwright
         run: pnpm install
+      # official-gyp = the official PW image with the node-gyp toolchain added at runtime (the cost our
+      # playwright-gyp bakes away). GHA runs container steps as root, so apt needs no sudo here.
+      - name: Install node-gyp toolchain
+        if: ${{ matrix.scenario == 'official-gyp' }}
+        run: apt-get update && apt-get install -y build-essential
+      - name: Install docker
+        # Install only if missing (idempotent; harmless on images that already have docker; real cost
+        # on the MS PW image). For the "docker compose + pw[+ gyp]" use-case comparison.
+        if: ${{ startsWith(matrix.scenario, 'official') }}
+        run: command -v docker >/dev/null || (apt-get update && apt-get install -y docker.io docker-compose-v2)
+      - name: Compute install download size
+        shell: bash
+        run: |
+          NA=$(awk '/^[ \t]*eth0:/{print $2}' /proc/net/dev)
+          NB=$(cat /tmp/nb_rx)
+          echo $(( (NA - NB) / 1048576 )) > /tmp/install-dl-mb.txt
+          echo "install dl = $(cat /tmp/install-dl-mb.txt) MB"
       - name: Run Playwright tests
         working-directory: playwright
+        shell: bash   # container jobs default to `sh`, where the [[ … ]] tests below are "not found"
         run: |
           # The official MS image runs as root, but GHA forces HOME=/github/home (owned by pwuser);
           # Firefox/WebKit refuse to launch unless $HOME is owned by the current user, so point root at /root.
-          [ "${{ matrix.scenario }}" = "official" ] && export HOME=/root
+          [[ "${{ matrix.scenario }}" == official* ]] && export HOME=/root
           # Alpine's config only defines the chromium project, so never ask it for firefox/webkit.
           if [[ "${{ matrix.scenario }}" == alpine-* ]] || [ "${{ matrix.browsers }}" != "all" ]; then
             P="--project=chromium"
@@ -154,6 +186,13 @@ jobs:
             P="--project=chromium --project=firefox --project=webkit"
           fi
           pnpm exec playwright test $P
+      - name: Upload install download size
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: install-dl-${{ matrix.scenario }}-${{ matrix.browsers }}-${{ matrix.run }}
+          path: /tmp/install-dl-mb.txt
+          if-no-files-found: ignore
 
   # Same benchmark, but executed through nektos/act (the "use these images as your local act runner"
   # path). act runs inside this hosted job and drives the host Docker, so time-to-tests can't come from
@@ -167,9 +206,9 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        scenario: [baseline, official, ubuntu-dood, ubuntu-dood-gyp, ubuntu-dind, ubuntu-dind-gyp, alpine-dood, alpine-dood-gyp, alpine-dind, alpine-dind-gyp]
+        scenario: [official, official-gyp, ubuntu-dood, ubuntu-dood-gyp, ubuntu-dind, ubuntu-dind-gyp, alpine-dood, alpine-dood-gyp, alpine-dind, alpine-dind-gyp]
         browsers: [chromium, all]
-        run: [1, 2, 3, 4, 5, 6, 7, 8, 9, 10]
+        run: [1, 2, 3, 4, 5]
         exclude:
           - scenario: alpine-dood       # Chromium-only on musl
             browsers: all
@@ -179,14 +218,12 @@ jobs:
             browsers: all
           - scenario: alpine-dind-gyp
             browsers: all
+        # baseline is intentionally not in this matrix: a true bare-runner manual install inside nested
+        # act+DinD pays >15 min for the apt unpack of ~70 GUI/Mesa libs. The act tables show the row with
+        # a hardcoded `> 15mn` placeholder and compare every other scenario to the `official` PW image.
     steps:
       - uses: actions/checkout@v4
-      - name: Log in to GHCR (pull our private sha images)
-        uses: docker/login-action@v3
-        with:
-          registry: ghcr.io
-          username: ${{ github.actor }}
-          password: ${{ secrets.GITHUB_TOKEN }}
+      # DEV MODE: Docker Hub public images — no registry login needed.
       - name: Install act
         run: |
           curl --proto '=https' --tlsv1.2 -sSf https://raw.githubusercontent.com/nektos/act/master/install.sh \
@@ -199,30 +236,50 @@ jobs:
           TAG="${{ needs.config.outputs.tag }}"
           SC="${{ matrix.scenario }}"
           case "$SC" in
-            baseline) IMG="catthehacker/ubuntu:act-22.04" ;;
-            official) IMG="mcr.microsoft.com/playwright:v${PW}-noble" ;;
-            *-gyp)    IMG="ghcr.io/jclaveau/${SC%-gyp}-playwright-gyp:${TAG}" ;;
-            *)        IMG="ghcr.io/jclaveau/${SC}-playwright:${TAG}" ;;
+            official|official-gyp) IMG="mcr.microsoft.com/playwright:v${PW}-noble" ;;
+            *-gyp)    IMG="jclaveau/${SC%-gyp}-playwright-gyp:${TAG}" ;;
+            *)        IMG="jclaveau/${SC}-playwright:${TAG}" ;;
           esac
           echo "image=$IMG" >> "$GITHUB_OUTPUT"
       - name: Benchmark via act
+        # All act cells use either the official PW image (pre-baked browsers+deps) or one of our prebuilt
+        # images, so the inner workload is well under a minute. 5 min is a generous ceiling for noise.
+        timeout-minutes: 5
         run: |
           IMG="${{ steps.img.outputs.image }}"
           OUT="act-${{ matrix.scenario }}-${{ matrix.browsers }}-${{ matrix.run }}.json"
+          LOG="act-${{ matrix.scenario }}-${{ matrix.browsers }}-${{ matrix.run }}.log"
+          # Used-bytes on / before/after the act run — captures docker image pull + container layers +
+          # whatever the inner install steps write. Hosted runner's docker root is on /, so / delta is
+          # the full footprint a user would see locally too.
+          DU_BEFORE=$(df -B1 --output=used / | tail -1 | tr -d ' ')
           START=$(date +%s.%N)
           set +e
-          act push -W .github/act/bench.yml --bind \
+          # --verbose: act-level diagnostic output (container creation, step transitions, etc.).
+          # set -x inside .github/act/bench.yml echoes every inner command before it runs.
+          timeout --kill-after=5 900 act --verbose push -W .github/act/bench.yml --bind \
             -P ubuntu-latest="$IMG" \
-            --env SCENARIO="${{ matrix.scenario }}" --env BROWSERS="${{ matrix.browsers }}" 2>&1 | tee act.log
+            --env SCENARIO="${{ matrix.scenario }}" --env BROWSERS="${{ matrix.browsers }}" 2>&1 | tee "$LOG"
           rc=${PIPESTATUS[0]}
           set -e
           END=$(date +%s.%N)
-          STEP_START=$(grep -aoE 'ACT_STEP_START=[0-9.]+' act.log | head -1 | cut -d= -f2)
-          TEST_START=$(grep -aoE 'ACT_TEST_START=[0-9.]+' act.log | head -1 | cut -d= -f2)
-          TEST_END=$(grep -aoE 'ACT_TEST_END=[0-9.]+' act.log | head -1 | cut -d= -f2)
-          python3 - "$START" "$END" "$STEP_START" "$TEST_START" "$TEST_END" "$rc" "$OUT" "${{ matrix.scenario }}" "${{ matrix.browsers }}" <<'PY'
+          DU_AFTER=$(df -B1 --output=used / | tail -1 | tr -d ' ')
+          # Failure tail: surfaces the install state at kill so the GHA step log ends with the relevant lines.
+          if [ "$rc" -ne 0 ]; then
+            echo "::group::act log tail (rc=$rc) — last 200 lines"
+            tail -200 "$LOG" || true
+            echo "::endgroup::"
+            echo "::group::docker ps -a (container state at kill)"
+            docker ps -a --no-trunc || true
+            echo "::endgroup::"
+          fi
+          STEP_START=$(grep -aoE 'ACT_STEP_START=[0-9.]+' "$LOG" | head -1 | cut -d= -f2)
+          TEST_START=$(grep -aoE 'ACT_TEST_START=[0-9.]+' "$LOG" | head -1 | cut -d= -f2)
+          TEST_END=$(grep -aoE 'ACT_TEST_END=[0-9.]+' "$LOG" | head -1 | cut -d= -f2)
+          DL_BYTES=$(grep -aoE 'ACT_INSTALL_DL_BYTES=[0-9]+' "$LOG" | head -1 | cut -d= -f2)
+          python3 - "$START" "$END" "$STEP_START" "$TEST_START" "$TEST_END" "$rc" "$OUT" "${{ matrix.scenario }}" "${{ matrix.browsers }}" "$DL_BYTES" "$DU_BEFORE" "$DU_AFTER" <<'PY'
           import json, sys
-          start, end, step, tstart, tend, rc, out, sc, mode = sys.argv[1:10]
+          start, end, step, tstart, tend, rc, out, sc, mode, dl, du_b, du_a = sys.argv[1:13]
           f = lambda x: float(x) if x else None
           start, end, step, tstart, tend = float(start), float(end), f(step), f(tstart), f(tend)
           rec = {"scenario": sc, "mode": mode, "rc": int(rc), "total": end - start}
@@ -230,21 +287,26 @@ jobs:
           rec["install"] = (tstart - step) if (tstart and step) else None
           rec["ttt"] = (tstart - start) if tstart else None
           rec["test"] = (tend - tstart) if (tend and tstart) else None
+          rec["install_dl_mb"] = (int(dl) // 1048576) if dl else None
+          rec["disk_mb"] = ((int(du_a) - int(du_b)) // 1048576) if (du_a and du_b) else None
           json.dump(rec, open(out, "w"))
           print(rec)
           PY
           test "$rc" -eq 0 && test -n "$TEST_START"
-      - name: Upload act result
+      - name: Upload act result + log
         if: always()
         uses: actions/upload-artifact@v4
         with:
           name: act-${{ matrix.scenario }}-${{ matrix.browsers }}-${{ matrix.run }}
-          path: act-${{ matrix.scenario }}-${{ matrix.browsers }}-${{ matrix.run }}.json
+          # JSON is consumed by the summary; .log is for human diagnosis (full tee of act --verbose).
+          path: |
+            act-${{ matrix.scenario }}-${{ matrix.browsers }}-${{ matrix.run }}.json
+            act-${{ matrix.scenario }}-${{ matrix.browsers }}-${{ matrix.run }}.log
           if-no-files-found: ignore
 
   # Read GitHub's own per-step timings (hosted scenarios) + the act artifacts, and render the summary.
   summary:
-    needs: [baseline, container, act]
+    needs: [config, baseline, container, act]
     if: always()
     runs-on: ubuntu-latest
     permissions:
@@ -258,13 +320,53 @@ jobs:
           pattern: act-*
           path: act-results
           merge-multiple: true
+      - name: Download install-dl artifacts (hosted)
+        uses: actions/download-artifact@v4
+        continue-on-error: true
+        with:
+          pattern: install-dl-*
+          path: install-dl
+          # Each artifact unpacks to install-dl/install-dl-<sc>-<br>-<run>/install-dl-mb.txt; filename
+          # alone has no scenario info so we DON'T merge — directory name carries the key.
+      # DEV MODE: image manifests pulled from Docker Hub (public) — no registry login needed.
+      - name: Compute image sizes (compressed amd64)
+        env:
+          PW: ${{ github.event.inputs.pw_version || '1.50.1' }}
+          TAG: ${{ needs.config.outputs.tag }}
+        run: |
+          OFFICIAL="mcr.microsoft.com/playwright:v${PW}-noble"
+          GHCR="jclaveau"   # DEV MODE: Docker Hub base. For sha mode change to "ghcr.io/jclaveau".
+          declare -A IMG=(
+            [official]="$OFFICIAL"
+            [official-gyp]="$OFFICIAL"
+            [ubuntu-dood]="$GHCR/ubuntu-dood-playwright:$TAG"
+            [ubuntu-dood-gyp]="$GHCR/ubuntu-dood-playwright-gyp:$TAG"
+            [ubuntu-dind]="$GHCR/ubuntu-dind-playwright:$TAG"
+            [ubuntu-dind-gyp]="$GHCR/ubuntu-dind-playwright-gyp:$TAG"
+            [alpine-dood]="$GHCR/alpine-dood-playwright:$TAG"
+            [alpine-dood-gyp]="$GHCR/alpine-dood-playwright-gyp:$TAG"
+            [alpine-dind]="$GHCR/alpine-dind-playwright:$TAG"
+            [alpine-dind-gyp]="$GHCR/alpine-dind-playwright-gyp:$TAG"
+          )
+          : > sizes.tsv
+          for sc in "${!IMG[@]}"; do
+            # sum the amd64/linux layer sizes (compressed) — handles OCI (ours) + schemaV2 (official)
+            bytes="$(docker manifest inspect --verbose "${IMG[$sc]}" 2>/dev/null | jq -r '
+              (if type=="array" then . else [.] end)
+              | map(select((.Descriptor.platform.architecture // "amd64")=="amd64"
+                           and (.Descriptor.platform.os // "linux")=="linux"))
+              | (.[0] | (.SchemaV2Manifest.layers // .OCIManifest.layers // []) | map(.size) | add) // 0' 2>/dev/null)"
+            [ -z "$bytes" ] && bytes=0
+            printf '%s\t%s\n' "$sc" "$(( bytes / 1048576 ))" >> sizes.tsv
+          done
+          echo "=== image sizes (MB) ==="; cat sizes.tsv
       - name: Collect timings and write summary
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           gh api --paginate "repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/jobs" --jq '.jobs[]' > jobs.ndjson
           python3 - <<'PY'
-          import json, os, glob, statistics
+          import json, os, glob, statistics, urllib.parse
           from collections import defaultdict
           from datetime import datetime
 
@@ -277,8 +379,47 @@ jobs:
           def fmt(x):
               return "—" if x is None else f"{x:.0f}s"
 
-          INSTALL = {"Install project deps", "Install Playwright browsers + system deps"}
+          INSTALL = {"Install project deps", "Install Playwright browsers + system deps",
+                     "Install node-gyp toolchain", "Install docker"}
           jobs = [json.loads(line) for line in open("jobs.ndjson") if line.strip()]
+
+          # scenario -> compressed image size (MB), from the Compute-image-sizes step (baseline has none).
+          SIZE = {}
+          try:
+              for line in open("sizes.tsv"):
+                  sc, mb = line.rstrip("\n").split("\t")
+                  SIZE[sc] = int(mb)
+          except FileNotFoundError:
+              pass
+
+          def size_cell(sc):
+              mb = SIZE.get(sc)
+              return "—" if mb is None else f"{mb}&nbsp;MB"
+
+          # (scenario, mode) -> [install download MB per run]; hosted from artifact files, act from JSON.
+          INSTALL_DL = defaultdict(list)
+          for d in sorted(glob.glob("install-dl/install-dl-*")):
+              key = os.path.basename(d)[len("install-dl-"):]
+              parts = key.rsplit("-", 2)
+              if len(parts) != 3:
+                  continue
+              sc, mode, _run = parts
+              try:
+                  with open(os.path.join(d, "install-dl-mb.txt")) as fh:
+                      INSTALL_DL[(sc, mode)].append(int(fh.read().strip()))
+              except (FileNotFoundError, ValueError):
+                  pass
+
+          def full_dl_cell(sc, mode, dl_overrides=None):
+              # full dl = compressed image pull + bytes downloaded during install steps; baseline has no
+              # image so it's pure install dl.
+              dl_list = dl_overrides if dl_overrides is not None else INSTALL_DL.get((sc, mode), [])
+              dl_mb = (sum(dl_list) // len(dl_list)) if dl_list else None
+              img_mb = SIZE.get(sc, 0)
+              if dl_mb is None and not img_mb:
+                  return "—"
+              total = (dl_mb or 0) + (img_mb or 0)
+              return f"{total}&nbsp;MB"
 
           agg = defaultdict(lambda: defaultdict(list))   # (scenario, mode) -> metric -> [values per run]
           oks = defaultdict(lambda: [0, 0])              # (scenario, mode) -> [successful, total]
@@ -356,13 +497,41 @@ jobs:
                   ds += f" (CV {c:.0f}%)"
               return ds, f"{'−' if d < 0 else '+'}{abs(d / base * 100):.0f}%"
 
-          # Each slim scenario sits next to its -gyp twin so the compiler's pull cost is easy to read.
-          order = ["baseline", "official",
-                   "ubuntu-dood", "ubuntu-dood-gyp", "ubuntu-dind", "ubuntu-dind-gyp",
-                   "alpine-dood", "alpine-dood-gyp", "alpine-dind", "alpine-dind-gyp"]
+          # Per-Δ-cell shields.io badge: the label IS the value, the color encodes sign + magnitude
+          # interpolated grey↔green (gains) or grey↔red (losses), normalized to the column's extremes.
+          # GitHub step-summary markdown strips inline `style`/`bgcolor` from <td> but keeps <img>, so
+          # rendering color via a static-badge endpoint is the only way to get true RGB nuance here.
+          _BADGE = "https://img.shields.io/static/v1"
+          _GREY, _GREEN, _RED = (238, 238, 238), (46, 204, 113), (231, 76, 60)
+          def _mix(a, b, t): return tuple(int(a[i] + (b[i] - a[i]) * t) for i in range(3))
+          def badge(value, vmin, vmax, label):
+              if not label or label == "—":
+                  return label or "—"
+              color = _GREY
+              if value is not None:
+                  if value < 0 and vmin is not None and vmin < 0:
+                      color = _mix(_GREY, _GREEN, max(0.0, min(1.0, value / vmin)))
+                  elif value > 0 and vmax is not None and vmax > 0:
+                      color = _mix(_GREY, _RED, max(0.0, min(1.0, value / vmax)))
+              q = urllib.parse.urlencode({"label": "", "message": label,
+                                          "color": "{:02x}{:02x}{:02x}".format(*color),
+                                          "style": "for-the-badge"})
+              return f'<img src="{_BADGE}?{q}" alt="{label}">'
+
+          def col_range(values):
+              vs = [v for v in values if v is not None]
+              return (min(vs), max(vs)) if vs else (None, None)
+
+          # Tables are split into "without gyp" and "with gyp" so each comparison has its own reference.
+          NO_GYP = ["baseline", "official",
+                    "ubuntu-dood", "ubuntu-dind", "alpine-dood", "alpine-dind"]
+          GYP    = ["baseline-gyp", "official-gyp",
+                    "ubuntu-dood-gyp", "ubuntu-dind-gyp", "alpine-dood-gyp", "alpine-dind-gyp"]
           LABEL = {
               "baseline": "manual install",
-              "official": "official container",
+              "baseline-gyp": "manual install + gyp",
+              "official": "official pw container",
+              "official-gyp": "official pw container + gyp",
               "ubuntu-dood": "ubuntu-dood-playwright",
               "ubuntu-dood-gyp": "ubuntu-dood-playwright-gyp",
               "ubuntu-dind": "ubuntu-dind-playwright",
@@ -373,26 +542,68 @@ jobs:
               "alpine-dind-gyp": "alpine-dind-playwright-gyp",
           }
 
-          def table(mode, title):
-              bs = stats95(agg[("baseline", mode)]["ttt"])
+          def table(mode, order_list, ref, title):
+              """Hosted table (HTML). Per-cell rgba background — each duration AND each Δ column gets
+              its own per-table gradient (deltas are the most important signal)."""
+              # Hosted = ubuntu-latest VM, so the baseline label gets a `vm +` prefix here (act tables
+              # use `LABEL` directly because their baseline is a Docker image, not a VM).
+              L = {**LABEL, "baseline": "vm + manual install", "baseline-gyp": "vm + manual install + gyp"}
+              bs = stats95(agg[(ref, mode)]["ttt"])
               base = bs[0] if bs else None
-              out = [
-                  f"### {title}",
-                  "",
-                  "| Scenario | Runs OK | Image pull | Install (deps+browsers) | Time-to-tests (mean ± 95% MoE) | Test run | Total | Δ vs manual install | Δ % |",
-                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-              ]
-              for sc in order:
+              rows = []
+              for sc in order_list:
                   key = (sc, mode)
                   if key not in seen:
                       continue
-                  cell, m = ttt_cell(agg[key]["ttt"])
-                  d, p = ("—", "—") if sc == "baseline" else delta_cell(m, base, agg[key]["ttt"])
+                  cell_str, ttt_m = ttt_cell(agg[key]["ttt"])
+                  if sc == ref or ttt_m is None or not base:
+                      d_str, p_str, d_num, p_num = "—", "—", None, None
+                  else:
+                      d_str, p_str = delta_cell(ttt_m, base, agg[key]["ttt"])
+                      d_num = ttt_m - base
+                      p_num = d_num / base * 100
                   ok, n = oks[key]
+                  rows.append({
+                      "sc": sc,
+                      "pull":    mean_of(agg[key]["pull"]),
+                      "install": mean_of(agg[key]["install"]),
+                      "ttt":     ttt_m,
+                      "test":    mean_of(agg[key]["test"]),
+                      "total":   mean_of(agg[key]["total"]),
+                      "d_num": d_num, "p_num": p_num,
+                      "cell_str": cell_str, "d": d_str, "p": p_str, "ok": ok, "n": n,
+                  })
+              R = {k: col_range([r[k] for r in rows]) for k in ("d_num", "p_num")}
+              out = [
+                  f"### {title}",
+                  "",
+                  '<table>',
+                  '<thead><tr>'
+                  '<th width="240">Scenario</th><th width="60">Runs OK</th><th width="90">Image&nbsp;size</th>'
+                  '<th>pull</th><th>install</th><th width="90">full&nbsp;dl&nbsp;size</th><th>time to tests</th>'
+                  '<th>Test run</th><th>Total</th>'
+                  '<th>Δ</th>'
+                  '<th>Δ %</th>'
+                  '</tr></thead>',
+                  '<tbody>',
+              ]
+              for r in rows:
                   out.append(
-                      f"| {LABEL.get(sc, sc)} | {ok}/{n} | {fmt(mean_of(agg[key]['pull']))} | {fmt(mean_of(agg[key]['install']))} "
-                      f"| {cell} | {fmt(mean_of(agg[key]['test']))} | {fmt(mean_of(agg[key]['total']))} | {d} | {p} |"
+                      f'<tr>'
+                      f'<td>{L.get(r["sc"], r["sc"])}</td>'
+                      f'<td>{r["ok"]}/{r["n"]}</td>'
+                      f'<td>{size_cell(r["sc"])}</td>'
+                      f'<td>{fmt(r["pull"])}</td>'
+                      f'<td>{fmt(r["install"])}</td>'
+                      f'<td>{full_dl_cell(r["sc"], mode)}</td>'
+                      f'<td>{r["cell_str"]}</td>'
+                      f'<td>{fmt(r["test"])}</td>'
+                      f'<td>{fmt(r["total"])}</td>'
+                      f'<td>{badge(r["d_num"], *R["d_num"], r["d"])}</td>'
+                      f'<td>{badge(r["p_num"], *R["p_num"], r["p"])}</td>'
+                      f'</tr>'
                   )
+              out.append('</tbody></table>')
               return "\n".join(out)
 
           # ---- act scenarios, from uploaded artifacts (self-measured time-to-tests) ----
@@ -409,64 +620,166 @@ jobs:
                   continue
               key = (sc, mode)
               act_seen.add(key)
-              for k in ("pull", "install", "ttt", "test", "total"):
+              for k in ("pull", "install", "ttt", "test", "total", "install_dl_mb", "disk_mb"):
                   if rec.get(k) is not None:
                       act[key][k].append(rec[k])
               act_ok[key][1] += 1
               act_ok[key][0] += 1 if rec.get("rc") == 0 else 0
 
-          def act_table(mode, title):
-              bkey = ("baseline", mode)
+          def act_table(mode, order_list, ref, title):
+              """Act table (HTML). Per-cell rgba background — duration cells AND each Δ column get their
+              own per-table gradients. Cold (Δ) and warm (Δ warm) can rank differently in act.
+              `baseline`/`baseline-gyp` rows are NOT measured in act (>15 min apt unpack nested in DinD)
+              — they're rendered as a placeholder row with `> 15mn` in `install` and `—` elsewhere, and
+              the Δ reference is the official PW container, not baseline."""
+              bkey = (ref, mode)
               bs = stats95(act[bkey]["ttt"])
               base = bs[0] if bs else None
-              warm_base = mean_of(act[bkey]["install"])   # time-to-tests minus the image pull
-              out = [
-                  f"### {title}",
-                  "",
-                  "| Scenario | Runs OK | Image pull | Install (deps+browsers) | Time-to-tests (mean ± 95% MoE) | Test run | Total | Δ vs manual install | Δ % | Δ warm (cached image) | Δ % warm |",
-                  "| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |",
-              ]
-              for sc in order:
+              # Warm ref = the table's cold ref (official PW container for no-gyp tables, official +
+              # node-gyp for gyp tables) — what the user pays on a warm run when the image is cached.
+              warm_base = mean_of(act[bkey]["install"])
+              disk_base = mean_of(act[bkey].get("disk_mb", []))
+              rows = []
+              for sc in order_list:
+                  if sc in ("baseline", "baseline-gyp"):
+                      rows.append({
+                          "sc": sc, "pull": None, "install": None, "ttt": None,
+                          "test": None, "total": None, "disk": None,
+                          "d_num": None, "p_num": None, "wd_num": None, "wp_num": None, "du_num": None,
+                          "cell_str": "—", "d": "—", "p": "—", "wd": "—", "wp": "—", "du": "—",
+                          "ok": 0, "n": 0, "stub": True,
+                      })
+                      continue
                   key = (sc, mode)
                   if key not in act_seen:
                       continue
-                  cell, m = ttt_cell(act[key]["ttt"])
+                  cell_str, ttt_m = ttt_cell(act[key]["ttt"])
                   warm_m = mean_of(act[key]["install"])
-                  if sc == "baseline":
-                      d, p, wd, wp = "—", "—", "—", "—"
+                  disk_m = mean_of(act[key].get("disk_mb", []))
+                  if sc == ref:
+                      d, p, wd, wp, du = "—", "—", "—", "—", "—"
+                      d_num = p_num = wd_num = wp_num = du_num = None
                   else:
-                      d, p = delta_cell(m, base, act[key]["ttt"])
+                      d, p = delta_cell(ttt_m, base, act[key]["ttt"])
                       wd, wp = delta_cell(warm_m, warm_base, act[key]["install"])
+                      d_num  = (ttt_m - base) if (ttt_m is not None and base) else None
+                      p_num  = (d_num / base * 100) if (d_num is not None and base) else None
+                      wd_num = (warm_m - warm_base) if (warm_m is not None and warm_base) else None
+                      wp_num = (wd_num / warm_base * 100) if (wd_num is not None and warm_base) else None
+                      du_num = ((disk_m - disk_base) / disk_base * 100
+                                if (disk_m is not None and disk_base) else None)
+                      du = (f"{'−' if du_num < 0 else '+'}{abs(du_num):.0f}%"
+                            if du_num is not None else "—")
                   ok, n = act_ok[key]
+                  rows.append({
+                      "sc": sc,
+                      "pull":    mean_of(act[key]["pull"]),
+                      "install": warm_m,
+                      "ttt":     ttt_m,
+                      "test":    mean_of(act[key]["test"]),
+                      "total":   mean_of(act[key]["total"]),
+                      "disk":    disk_m,
+                      "d_num": d_num, "p_num": p_num, "wd_num": wd_num, "wp_num": wp_num,
+                      "du_num": du_num,
+                      "cell_str": cell_str, "d": d, "p": p, "wd": wd, "wp": wp, "du": du,
+                      "ok": ok, "n": n, "stub": False,
+                  })
+              R = {k: col_range([r[k] for r in rows]) for k in
+                   ("d_num", "p_num", "wd_num", "wp_num", "du_num")}
+              out = [
+                  f"### {title}",
+                  "",
+                  '<table>',
+                  '<thead><tr>'
+                  '<th width="240">Scenario</th><th width="60">Runs OK</th><th width="90">Image&nbsp;size</th>'
+                  '<th>pull</th><th>install</th><th width="90">full&nbsp;dl&nbsp;size</th><th>time to tests</th>'
+                  '<th>Test run</th><th>Total</th>'
+                  '<th width="90">disk&nbsp;usage</th>'
+                  '<th>Δ disk %</th>'
+                  '<th>Δ</th>'
+                  '<th>Δ %</th>'
+                  '<th>Δ warm</th>'
+                  '<th>Δ % warm</th>'
+                  '</tr></thead>',
+                  '<tbody>',
+              ]
+              for r in rows:
+                  install_str = "&gt; 15mn" if r["stub"] else fmt(r["install"])
+                  runs_str = "—" if r["stub"] else f'{r["ok"]}/{r["n"]}'
+                  full_dl_str = "—" if r["stub"] else full_dl_cell(r["sc"], mode, act[(r["sc"], mode)].get("install_dl_mb", []))
+                  disk_str = "—" if r["disk"] is None else f'{int(r["disk"])}&nbsp;MB'
                   out.append(
-                      f"| {LABEL.get(sc, sc)} | {ok}/{n} | {fmt(mean_of(act[key]['pull']))} | {fmt(mean_of(act[key]['install']))} "
-                      f"| {cell} | {fmt(mean_of(act[key]['test']))} | {fmt(mean_of(act[key]['total']))} | {d} | {p} | {wd} | {wp} |"
+                      f'<tr>'
+                      f'<td>{LABEL.get(r["sc"], r["sc"])}</td>'
+                      f'<td>{runs_str}</td>'
+                      f'<td>{size_cell(r["sc"])}</td>'
+                      f'<td>{fmt(r["pull"])}</td>'
+                      f'<td>{install_str}</td>'
+                      f'<td>{full_dl_str}</td>'
+                      f'<td>{r["cell_str"]}</td>'
+                      f'<td>{fmt(r["test"])}</td>'
+                      f'<td>{fmt(r["total"])}</td>'
+                      f'<td>{disk_str}</td>'
+                      f'<td>{badge(r["du_num"], *R["du_num"], r["du"])}</td>'
+                      f'<td>{badge(r["d_num"],  *R["d_num"],  r["d"])}</td>'
+                      f'<td>{badge(r["p_num"],  *R["p_num"],  r["p"])}</td>'
+                      f'<td>{badge(r["wd_num"], *R["wd_num"], r["wd"])}</td>'
+                      f'<td>{badge(r["wp_num"], *R["wp_num"], r["wp"])}</td>'
+                      f'</tr>'
                   )
+              out.append('</tbody></table>')
               return "\n".join(out)
 
           parts = [
               "## Playwright cold-start benchmark",
               "",
-              "Each scenario runs 10×; timing columns are **means** across the runs, and Time-to-tests is "
-              "reported as **mean ± 95% margin of error** (Student's t on the n−1 sample SD). The Δ columns "
-              "carry the **CV** (coefficient of variation = SD ÷ mean) of the underlying metric — for act, "
-              "the cold and warm Δ show different CVs because the image pull adds noise. "
+              "Each scenario runs **5×** (bump the `run:` lists / `range(1;N)` to `range(1;11)` for 10× full stats). "
+              "The Δ columns still compute (point estimates over n=5). "
               "**Time-to-tests** = job start → the moment `playwright test` begins (queue excluded). "
               "*Image pull* is the `Initialize containers` step; *Install* is the runtime dep/browser "
-              "install that the prebuilt images bake in. Δ vs manual install is the time earned (− = faster).",
+              "install that the prebuilt images bake in. Δ is the time earned vs the table's reference row "
+              "(hosted → manual install; act → official PW container); − = faster.",
               "",
               "**Reading the CV** (rule of thumb): ≤5% tight · ≤10% good · 10–20% noisy · "
               ">20% unreliable — treat the mean with caution.",
               "",
-              table("chromium", "Chromium only"),
+              table("chromium", NO_GYP, "baseline",     "Via GHA — Chromium only — without gyp"),
               "",
-              table("all", "All browsers (chromium + firefox + webkit)"),
+              table("chromium", GYP,    "baseline-gyp", "Via GHA — Chromium only — with gyp"),
               "",
-              act_table("chromium", "Via act — Chromium only (local nektos/act runner)"),
+              table("all", NO_GYP, "baseline",     "Via GHA — All browsers — without gyp"),
               "",
-              act_table("all", "Via act — All browsers (local nektos/act runner)"),
+              table("all", GYP,    "baseline-gyp", "Via GHA — All browsers — with gyp"),
               "",
-              "_The `…-playwright-gyp` rows are the same image **plus the node-gyp toolchain** "
+              act_table("chromium", NO_GYP, "official",     "Via act — Chromium only — without gyp"),
+              "",
+              act_table("chromium", GYP,    "official-gyp", "Via act — Chromium only — with gyp"),
+              "",
+              act_table("all", NO_GYP, "official",     "Via act — All browsers — without gyp"),
+              "",
+              act_table("all", GYP,    "official-gyp", "Via act — All browsers — with gyp"),
+              "",
+              "_**Tables are split by gyp**: *hosted without-gyp* compares each scenario to the **vm + "
+              "manual install** row; *hosted with-gyp* to **vm + manual install + gyp**. *Act* tables "
+              "compare to the **official pw container** (`/-gyp`) — a from-scratch manual install inside "
+              "nested act+DinD pays >15 min for the apt unpack, so we don't run it and the row shows "
+              "`> 15mn` as a placeholder. Each Δ value is rendered as a shields.io badge whose color "
+              "interpolates grey↔green for gains and grey↔red for losses, normalized to that column's "
+              "`[min, max]` within the table. In act tables, Δ (cold) and Δ warm (install only) are "
+              "colored independently so their rankings can diverge._ "
+              "_Note that **act-in-DinD writes are noticeably slower than native** (overlayfs on overlayfs "
+              "through the hosted runner's docker), so any apt-install cell timing is the worst-case ceiling "
+              "— a user running `act` locally on their own SSD would see less of the apt-unpack cost._ "
+              "_**Image size** is the image's compressed (amd64) pull size — also the size delta vs the "
+              "`manual install` baseline, which pulls no image (`—`). **`full dl size`** = `Image size` "
+              "+ bytes downloaded during the `install` steps (pnpm tarballs, apt debs, Playwright "
+              "browser CDN), measured via `/proc/net/dev:eth0` rx delta between job start and just "
+              "before tests; for `manual install` rows there's no image so it equals the install dl. "
+              "**`official pw container + gyp`** is the "
+              "official image with the node-gyp toolchain added at runtime (`apt install build-essential`, "
+              "counted in *Install*) — the cost `…-playwright-gyp` bakes away; the `manual install` baseline "
+              "already has a usable toolchain (gcc/g++/make ship on `ubuntu-latest`), so its gyp cost is ~0. "
+              "The `…-playwright-gyp` rows are the same image **plus the node-gyp toolchain** "
               "(build-essential / build-base); compare each slim row with its `-gyp` twin to read the "
               "compiler's pull cost. "
               "`alpine-dood-playwright` and `alpine-dind-playwright` are Chromium-only (no Firefox/WebKit on musl). The **act** tables run each "
