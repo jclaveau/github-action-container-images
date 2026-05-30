@@ -71,3 +71,25 @@ Why each flag:
 The `test-dood-dind-act` CI job pins this recipe against both `ubuntu-dood` and
 `alpine-dood` (workspace ownership + `sudo true` + `$HOME` write + `$RUNNER_TOOL_CACHE`
 subdir write asserted) so a future act/base-image change can't silently break it.
+
+### Host UIDs without a passwd entry (advanced)
+
+`sudo`, `whoami`, and tools using `getpwuid()` refuse / warn when the host UID has no
+`/etc/passwd` entry in the image (only `0`, `1000`, `1001` do). For arbitrary UIDs the
+image ships `nss_wrapper` and a helper script — opt in from your workflow:
+
+```yaml
+- name: nss_wrapper passwd synthesis
+  run: |
+    . /usr/local/bin/nss-wrapper-setup
+    { echo "LD_PRELOAD=$LD_PRELOAD"
+      echo "NSS_WRAPPER_PASSWD=$NSS_WRAPPER_PASSWD"
+      echo "NSS_WRAPPER_GROUP=$NSS_WRAPPER_GROUP"
+    } >> "$GITHUB_ENV"
+```
+
+Subsequent steps inherit the env via `$GITHUB_ENV`. Fixes `whoami`, `$HOME`-via-passwd,
+and `getpwuid()` consumers (npm, git, login shells). **Does NOT fix `sudo`** — sudo is
+setuid and glibc strips `LD_PRELOAD` for setuid binaries (`AT_SECURE`). Pinning sudo
+too would require adding the wrapper to `/etc/ld.so.preload` system-wide (a global
+preload affecting every binary on every container start); out of scope here.

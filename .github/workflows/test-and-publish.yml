@@ -814,6 +814,29 @@ jobs:
           # asserted inside the act run (UID 1000 + supp group 1001); if `%runner` sudoers
           # (or `packer ALL=` name rule), `chmod 0775 /home/runner`, or `chmod 2775
           # /opt/hostedtoolcache` regress, act exits non-zero and this step fails first.
+      - name: Bind-mode arbitrary-UID via nss_wrapper (dood only)
+        if: matrix.mode == 'dood'
+        env:
+          IMG: ghcr.io/jclaveau/${{ matrix.os }}-${{ matrix.mode }}:${{ needs.github-context.outputs.build_tag }}
+        # UID 5000 has no /etc/passwd entry → exercises nss_wrapper. The workflow sources
+        # /usr/local/bin/nss-wrapper-setup and asserts `whoami` returns the synthetic
+        # `runner` name. Sudo is NOT tested here (setuid strips LD_PRELOAD; documented
+        # limitation). Workspace dir g+rwx + chowned to runner group so the post-`act-setup`
+        # chown (to 5000:5000) still leaves a dir UID 5000 can touch.
+        run: |
+          TESTDIR="$GITHUB_WORKSPACE/_bind-test-nss"
+          rm -rf "$TESTDIR"
+          mkdir -p "$TESTDIR"
+          chmod g+rwx "$TESTDIR"
+          pushd "$TESTDIR"
+          act push -W "$GITHUB_WORKSPACE/tests/act/smoke-dood-bind-arbitrary-uid.yml" --bind \
+            -P ubuntu-latest="$IMG" \
+            --container-options "--user 5000:5000 --group-add 1001 -e HOME=/home/runner"
+          owner=$(stat -c %u from-act.txt)
+          echo "from-act.txt owner uid=$owner; expected 5000 (no /etc/passwd entry)"
+          test "$owner" = "5000"
+          popd
+          sudo rm -rf "$TESTDIR"
 
 
   # ----------------------------------------------------------------------------

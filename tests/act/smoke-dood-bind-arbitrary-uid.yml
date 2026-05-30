@@ -1,0 +1,28 @@
+# Smoke workflow for the arbitrary-UID variant of the `act --bind` recipe — the host
+# UID has no /etc/passwd entry, so the workflow sources nss-wrapper-setup first to
+# synthesize one. Wired by test-dood-dind-act in .github/workflows/test-and-publish.yml
+# (UID 5000). Does NOT exercise `sudo` (setuid strips LD_PRELOAD; documented limit).
+name: act smoke (dood, --bind, arbitrary-uid via nss_wrapper)
+on: [push]
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - run: id
+      # Without the wrapper, `whoami` errors with `cannot find name for user ID 5000`.
+      - name: whoami before wrapper (expect failure)
+        run: whoami || echo "whoami failed before wrapper (expected)"
+      - name: nss_wrapper passwd synthesis
+        run: |
+          . /usr/local/bin/nss-wrapper-setup
+          { echo "LD_PRELOAD=$LD_PRELOAD"
+            echo "NSS_WRAPPER_PASSWD=$NSS_WRAPPER_PASSWD"
+            echo "NSS_WRAPPER_GROUP=$NSS_WRAPPER_GROUP"
+          } >> "$GITHUB_ENV"
+      - name: whoami after wrapper (must say 'runner')
+        run: |
+          name=$(whoami)
+          echo "whoami=$name"
+          test "$name" = "runner"
+      # Workspace write (TP step asserts host-side ownership matches --user)
+      - run: touch ./from-act.txt

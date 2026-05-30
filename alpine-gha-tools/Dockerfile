@@ -54,6 +54,7 @@ RUN echo "OS-level tools: Alpine equivalents of the ubuntu-gha-tools curated set
        parallel \
        brotli \
        python3 \
+       nss_wrapper \
     && ln -sf python3 /usr/bin/python \
     \
     && echo "Interactive bash sugar matching Ubuntu's default skel (.bashrc holds the aliases; .profile" \
@@ -86,6 +87,35 @@ RUN echo "OS-level tools: Alpine equivalents of the ubuntu-gha-tools curated set
     && mkdir -p /opt/hostedtoolcache \
     && chown -R 1001:1001 /opt/hostedtoolcache \
     && chmod 2775 /opt/hostedtoolcache
+
+# nss_wrapper helper: synthesises a /etc/passwd + /etc/group entry for an arbitrary
+# host UID at runtime, for tools that call getpwuid()/getgrgid() directly. Opt-in by
+# sourcing the script in a workflow step. Does NOT fix `sudo` (setuid strips
+# LD_PRELOAD). See dood/README.md. Inlined here (vs COPY) because the build context
+# is this per-image dir, not the repo root — kept identical to ubuntu-gha-tools.
+RUN <<'EOF' bash
+cat > /usr/local/bin/nss-wrapper-setup <<'SCRIPT'
+#!/bin/sh
+# Synthesise a /etc/passwd + /etc/group entry for the running UID/GID when one is
+# missing, so getpwuid()/getgrgid()-using tools find a name. No-op when the UID
+# already has an entry (root/packer/runner). See dood/README.md.
+uid=$(id -u)
+gid=$(id -g)
+if getent passwd "$uid" >/dev/null 2>&1; then
+  return 0 2>/dev/null || exit 0
+fi
+NSS_WRAPPER_PASSWD=${NSS_WRAPPER_PASSWD:-/tmp/.nss-passwd}
+NSS_WRAPPER_GROUP=${NSS_WRAPPER_GROUP:-/tmp/.nss-group}
+cp -f /etc/passwd "$NSS_WRAPPER_PASSWD"
+cp -f /etc/group  "$NSS_WRAPPER_GROUP"
+printf 'runner:x:%s:%s:CI host user:/home/runner:/bin/bash\n' "$uid" "$gid" >> "$NSS_WRAPPER_PASSWD"
+for cand in /usr/lib/x86_64-linux-gnu/libnss_wrapper.so /usr/lib/libnss_wrapper.so; do
+  [ -e "$cand" ] && LD_PRELOAD=$cand && break
+done
+export NSS_WRAPPER_PASSWD NSS_WRAPPER_GROUP LD_PRELOAD
+SCRIPT
+chmod 0755 /usr/local/bin/nss-wrapper-setup
+EOF
 
 USER runner
 
