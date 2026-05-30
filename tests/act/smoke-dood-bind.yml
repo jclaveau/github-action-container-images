@@ -1,0 +1,23 @@
+# Smoke workflow run through `act --bind` with the image used AS the runner (NOT as a job
+# container) — exercises the documented local-dev recipe where act bind-mounts the workspace
+# and `--container-options "--user $(id -u):$(id -g)"` makes step processes run as the host
+# user, so files created in $PWD land on the host owned by the host user (not by runner/1001).
+# Wired by test-dood-dind-act in .github/workflows/test-and-publish.yml; the ownership of
+# ./from-act.txt on the host is asserted there.
+name: act smoke (dood, --bind, host-uid)
+on: [push]
+jobs:
+  smoke:
+    runs-on: ubuntu-latest
+    steps:
+      - run: id
+      # Workspace write (bind mount → host ownership asserted by the TP step)
+      - run: touch ./from-act.txt
+      # Caveats avoidance: with `--group-add 1001` + `%runner` sudoers, sudo works as a
+      # non-runner UID; with `chmod 0775 /home/runner`, `$HOME` writes work too;
+      # with `chmod 2775 /opt/hostedtoolcache`, setup-* actions can mkdir + write there.
+      - run: sudo true
+      - run: touch "$HOME/from-act-home.txt"
+      - run: |
+          mkdir -p "$RUNNER_TOOL_CACHE/smoke/1.0.0/x64"
+          touch "$RUNNER_TOOL_CACHE/smoke/1.0.0/x64/marker"

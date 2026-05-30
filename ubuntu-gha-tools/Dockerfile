@@ -68,13 +68,15 @@ RUN echo "OS-level tools: a curated subset of actions/runner-images ubuntu-24.04
     && echo "packer ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/packer \
     && chmod 0440 /etc/sudoers.d/packer \
     && useradd -m -s /bin/bash -u 1001 -c ",,," runner \
-    && echo "runner ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/runner \
+    && echo "%runner ALL=(ALL) NOPASSWD:ALL" >> /etc/sudoers.d/runner \
     && chmod 0440 /etc/sudoers.d/runner \
+    && chmod 0775 /home/runner \
     && usermod -aG adm,users,systemd-journal runner \
     \
     && echo "Tool cache dir, as on the hosted runner (RUNNER_TOOL_CACHE)" \
     && mkdir -p /opt/hostedtoolcache \
-    && chown -R 1001:1001 /opt/hostedtoolcache
+    && chown -R 1001:1001 /opt/hostedtoolcache \
+    && chmod 2775 /opt/hostedtoolcache
 
 USER runner
 

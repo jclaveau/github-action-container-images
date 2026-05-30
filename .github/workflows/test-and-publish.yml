@@ -775,6 +775,45 @@ jobs:
           act push -W tests/act/smoke-${{ matrix.mode }}.yml \
             -P ubuntu-latest=-self-hosted \
             --var RUNNER_IMAGE="$IMG"
+      - name: Bind-mode host-UID recipe — image accepts a non-default UID (dood only)
+        if: matrix.mode == 'dood'
+        env:
+          IMG: ghcr.io/jclaveau/${{ matrix.os }}-${{ matrix.mode }}:${{ needs.github-context.outputs.build_tag }}
+        # GHA-hosted runners are UID 1001 (= image USER `runner`), so `--user $(id -u)` would
+        # be a no-op here. We force UID 1000 — the image's `packer` user — to exercise the
+        # override: distinct from runner (proves --user took effect) AND has a passwd entry
+        # (so `sudo`'s `getpwuid()` lookup succeeds; sudo refuses arbitrary UIDs with no
+        # passwd entry on every OS, not specific to Alpine). UID 1000 is also exactly what
+        # a typical Linux dev runs as locally — same code path as the documented recipe.
+        # The temp workspace is pre-chowned to the runner group + chmod g+rwx so the post-
+        # `act-setup` chown (act forces 1001:1001 regardless of --user) leaves a group-
+        # writable dir that UID 1000 + `--group-add 1001` can touch via the runner group.
+        run: |
+          # Subdir of $GITHUB_WORKSPACE (owned by the runner already, mode 0755) chmodded
+          # g+rwx so the post-`act-setup` chown (act forces 1001:1001 inside the container,
+          # bind-mount propagates to host) leaves a group-writable dir that UID 1000 with
+          # `--group-add 1001` can touch via the runner supplementary group. We stay inside
+          # $GITHUB_WORKSPACE to avoid /tmp namespace quirks observed earlier.
+          TESTDIR="$GITHUB_WORKSPACE/_bind-test"
+          rm -rf "$TESTDIR"
+          mkdir -p "$TESTDIR"
+          chmod g+rwx "$TESTDIR"
+          pushd "$TESTDIR"
+          act push -W "$GITHUB_WORKSPACE/tests/act/smoke-dood-bind.yml" --bind \
+            -P ubuntu-latest="$IMG" \
+            --container-options "--user 1000:1000 --group-add 1001 -e HOME=/home/runner"
+          owner=$(stat -c %u from-act.txt)
+          echo "from-act.txt owner uid=$owner; expected 1000 (image USER runner is 1001)"
+          test "$owner" = "1000"
+          test "$owner" != "1001"
+          popd
+          # act chowned $TESTDIR + contents to 1000:1000 (the --user target), so the
+          # GHA runner (1001) can't `rm` without escalation.
+          sudo rm -rf "$TESTDIR"
+          # In-workflow `sudo true` + `$HOME` write + `$RUNNER_TOOL_CACHE` subdir write are
+          # asserted inside the act run (UID 1000 + supp group 1001); if `%runner` sudoers
+          # (or `packer ALL=` name rule), `chmod 0775 /home/runner`, or `chmod 2775
+          # /opt/hostedtoolcache` regress, act exits non-zero and this step fails first.
 
 
   # ----------------------------------------------------------------------------

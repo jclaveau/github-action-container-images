@@ -36,3 +36,38 @@ jobs:
       - run: docker compose -f docker-compose-tests.yaml up -d --wait
       - run: nc -zv host.docker.internal 5432
 ```
+
+## Running locally with `act --bind`
+
+The image's `USER` is `runner` (**UID 1001**) to mirror GitHub's `ubuntu-latest`. Under
+`act --bind` the workspace is bind-mounted (not copied), so files the job creates in `$PWD`
+land on **the host owned by 1001** — friction if your host UID is 1000.
+
+Make step processes run as the host user by forwarding `--user` to `docker create`, plus
+joining the `runner` group (GID 1001) so `sudo` and `/home/runner` writes still work:
+
+```bash
+act --bind \
+    --container-options "--user $(id -u):$(id -g) --group-add 1001 -e HOME=/home/runner" \
+    -P ubuntu-latest=jclaveau/ubuntu-dood:latest \
+    -W .github/workflows/<your-workflow>.yml
+```
+
+Opt-in by construction — the published image keeps `USER runner`, only the consumer's local
+invocation overrides it. The GHA / `container:` path above is untouched.
+
+Why each flag:
+- `--user $UID:$GID` — files created in `$PWD` land on the host owned by the host user.
+- `--group-add 1001` — process gets `runner` as a supplementary group → `%runner`
+  sudoers rule matches (sudo works); `/home/runner` (group-writable, `0775`) accepts
+  writes to `~/.cache` / `~/.npm` / `~/.config`; `/opt/hostedtoolcache` (`2775`, SGID +
+  g+w) accepts `setup-node` / `setup-python` / … writes, with new subdirs inheriting
+  group `runner`.
+- `-e HOME=/home/runner` — sets `$HOME` explicitly so tools that read the env (git, npm,
+  pnpm, docker, playwright, …) resolve `~` cleanly without an `/etc/passwd` entry for the
+  caller's UID. Tools that call `getpwuid()` directly may still log a cosmetic warning;
+  none we exercise break.
+
+The `test-dood-dind-act` CI job pins this recipe against both `ubuntu-dood` and
+`alpine-dood` (workspace ownership + `sudo true` + `$HOME` write + `$RUNNER_TOOL_CACHE`
+subdir write asserted) so a future act/base-image change can't silently break it.
