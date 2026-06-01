@@ -4,7 +4,7 @@ FROM ${BASE_IMAGE}
 
 ARG DOCKER_GROUP_ID=${DOCKER_GROUP_ID}
 # Renovate will update these
-ARG DOCKER_VERSION=28.5.1
+ARG DOCKER_VERSION=28.5.2
 ARG DOCKER_COMPOSE_VERSION=2.39.4
 
 # Shared base for the dood/dind variants: ubuntu-gha-tools + Docker Engine & Compose.
